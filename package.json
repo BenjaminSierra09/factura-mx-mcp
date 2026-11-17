@@ -1,0 +1,46 @@
+{
+  "name": "factura-mx-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Asistente de facturación de tickets mexicanos con portal web y MCP",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/src/server.js",
+    "test": "node --test --import tsx tests/*.test.ts tests/*/*.test.ts",
+    "check": "tsc --noEmit -p tsconfig.json"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/node": "^2.1.2",
+    "@modelcontextprotocol/server": "^2.4.0",
+    "@napi-rs/canvas": "^1.1.1",
+    "better-sqlite3": "^13.2.0",
+    "dotenv": "^17.2.3",
+    "express": "^5.3.0",
+    "express-rate-limit": "^8.7.4",
+    "fast-xml-parser": "^5.12.1",
+    "fflate": "^0.8.3",
+    "helmet": "^8.1.0",
+    "ipaddr.js": "^2.5.0",
+    "jsqr": "^1.4.0",
+    "multer": "^2.0.2",
+    "nodemailer": "^10.6.0",
+    "openai": "^7.57.0",
+    "pdfjs-dist": "^6.5.438",
+    "playwright": "^1.65.1",
+    "sharp": "^0.35.5",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/express": "^5.0.5",
+    "@types/multer": "^2.0.0",
+    "@types/node": "^24.8.1",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  }
+}

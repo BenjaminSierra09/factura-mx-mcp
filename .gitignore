@@ -1,0 +1,10 @@
+node_modules/
+dist/
+data/
+.env
+.env.tunnel
+output/
+playwright-report/
+test-results/
+.playwright-cli/
+.DS_Store
