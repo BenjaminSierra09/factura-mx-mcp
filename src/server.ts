@@ -1,7 +1,8 @@
 import express, { type Request, type Response, type NextFunction } from 'express';
 import helmet from 'helmet';
 import multer from 'multer';
-import { rateLimit } from 'express-rate-limit';
+import { rateLimit, ipKeyGenerator } from 'express-rate-limit';
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { toNodeHandler } from '@modelcontextprotocol/node';
 import * as z from 'zod/v4';
@@ -14,7 +15,12 @@ import { createInvoiceJob, continueHumanAction, getJob, getJobEvents, getLiveSes
 import { getFile, getJobScreenshot } from './storage.js';
 import { mcpHandler } from './mcp.js';
 import { publicInputErrorMessage } from './errors.js';
+import { assertRecaptchaConfiguration, recaptchaSiteKey, verifyRecaptchaToken } from './recaptcha.js';
+import { fiscalCatalogSource, formasPago, isFormaPago, regimenes, usosCfdi } from './fiscalCatalogs.js';
+import { suggestPaymentForm } from './payment.js';
+import { autoInvoiceTicket } from './autoInvoice.js';
 
+assertRecaptchaConfiguration();
 const app = express();
 const publicDir = path.resolve(process.cwd(), 'public');
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024, files: 1 } });
@@ -30,13 +36,28 @@ app.use((req, res, next) => {
   next();
 });
 app.use(helmet({ contentSecurityPolicy: {
-  directives: { defaultSrc: ["'self'"], scriptSrc: ["'self'"], styleSrc: ["'self'"], imgSrc: ["'self'", 'data:', 'blob:'],
-    connectSrc: ["'self'"], objectSrc: ["'none'"], frameAncestors: ["'none'"] },
+  directives: { defaultSrc: ["'self'"], scriptSrc: ["'self'", 'https://www.google.com/recaptcha/', 'https://www.gstatic.com/recaptcha/'],
+    styleSrc: ["'self'"], imgSrc: ["'self'", 'data:', 'blob:'],
+    frameSrc: ['https://www.google.com/recaptcha/', 'https://recaptcha.google.com/recaptcha/'],
+    connectSrc: ["'self'", 'https://www.google.com/recaptcha/'], objectSrc: ["'none'"], frameAncestors: ["'none'"] },
 } }));
 app.use(express.json({ limit: '10mb', strict: true }));
 
-const authLimit = rateLimit({ windowMs: 15 * 60_000, limit: 20, standardHeaders: 'draft-8', legacyHeaders: false,
+// A generous per-connector ceiling plus a stricter per-email ceiling prevents
+// one shared cloudflared IP from limiting all legitimate accounts to 20 attempts.
+const authGlobalLimit = rateLimit({ windowMs: 15 * 60_000, limit: 300, standardHeaders: 'draft-8', legacyHeaders: false,
   message: { error: 'Demasiados intentos. Espera unos minutos.' } });
+const authEmailLimit = rateLimit({ windowMs: 15 * 60_000, limit: 20, standardHeaders: 'draft-8', legacyHeaders: false,
+  keyGenerator: req => {
+    const value = req.body && typeof req.body === 'object' ? (req.body as Record<string, unknown>).email : undefined;
+    if (typeof value === 'string') {
+      const email = value.trim().toLowerCase();
+      if (email && email.length <= 254) return `email:${createHash('sha256').update(email).digest('hex')}`;
+    }
+    return `ip:${ipKeyGenerator(req.ip || '127.0.0.1')}`;
+  },
+  message: { error: 'Demasiados intentos para esta cuenta. Espera unos minutos.' },
+});
 
 function configuredLimit(name: string, fallback: number, maximum: number): number {
   const parsed = Number(process.env[name]);
@@ -95,18 +116,43 @@ function limitIntensiveConcurrency(_req: Request, res: Response, next: NextFunct
 }
 
 app.get('/healthz', (_req, res) => res.json({ ok: true }));
+app.get('/api/config', (_req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({ recaptchaSiteKey, registrationEnabled: process.env.ALLOW_REGISTRATION !== 'false' });
+});
+app.get('/api/fiscal-catalogs', (_req, res) => {
+  res.setHeader('Cache-Control', 'public, max-age=3600');
+  res.json({ source: fiscalCatalogSource, regimenes, formasPago, usosCfdi });
+});
 
-app.post('/api/auth/register', authLimit, checkOrigin, async (req, res) => {
+app.post('/api/fiscal/payment-suggestion', requireSession, checkOrigin, requireCsrf, (req, res) => {
+  const { textoAdicional } = z.object({ textoAdicional: z.string().trim().min(1).max(500) }).parse(req.body);
+  res.json({ sugerencia: suggestPaymentForm(textoAdicional, 'usuario') });
+});
+
+async function requireAuthRecaptcha(token: string | undefined, req: Request, res: Response): Promise<boolean> {
+  if (!recaptchaSiteKey) return true;
+  const result = await verifyRecaptchaToken(token, req.hostname);
+  if (result === 'valid') return true;
+  res.status(result === 'unavailable' ? 503 : 403).json({ error: result === 'unavailable'
+    ? 'No se pudo verificar reCAPTCHA. Intenta de nuevo en unos momentos.'
+    : 'Completa la verificación reCAPTCHA y vuelve a intentarlo.' });
+  return false;
+}
+
+app.post('/api/auth/register', checkOrigin, authGlobalLimit, authEmailLimit, async (req, res) => {
   if (process.env.ALLOW_REGISTRATION === 'false') { res.status(403).json({ error: 'Registro desactivado' }); return; }
-  const input = z.object({ email: z.email(), password: z.string().min(12).max(256) }).parse(req.body);
+  const input = z.object({ email: z.email(), password: z.string().min(12).max(256), recaptchaToken: z.string().max(4096).optional() }).parse(req.body);
+  if (!(await requireAuthRecaptcha(input.recaptchaToken, req, res))) return;
   const user = await createUser(input.email, input.password);
   const session = createSession(user.id);
   setSessionCookie(res, session.token);
   res.status(201).json({ id: user.id, email: user.email, csrfToken: session.csrfToken });
 });
 
-app.post('/api/auth/login', authLimit, checkOrigin, async (req, res) => {
-  const input = z.object({ email: z.email(), password: z.string() }).parse(req.body);
+app.post('/api/auth/login', checkOrigin, authGlobalLimit, authEmailLimit, async (req, res) => {
+  const input = z.object({ email: z.email(), password: z.string(), recaptchaToken: z.string().max(4096).optional() }).parse(req.body);
+  if (!(await requireAuthRecaptcha(input.recaptchaToken, req, res))) return;
   const user = await authenticate(input.email, input.password);
   if (!user) { res.status(401).json({ error: 'Correo o contraseña incorrectos' }); return; }
   const session = createSession(user.id);
@@ -166,6 +212,15 @@ app.get('/api/tickets/:id', requireSession, (req, res) => {
   if (!ticket) { res.status(404).json({ error: 'Ticket no encontrado' }); return; }
   res.json(ticket);
 });
+
+app.post('/api/tickets/:id/auto-invoice', requireSession, checkOrigin, requireCsrf,
+  intensiveLimit, limitIntensiveConcurrency, async (req, res) => {
+    const ticketId = String(req.params.id);
+    if (!getTicket(res.locals.userId, ticketId)) { res.status(404).json({ error: 'Ticket no encontrado' }); return; }
+    const options = z.object({ textoAdicional: z.string().trim().max(500).optional(),
+      formaPago: z.string().refine(isFormaPago, 'Forma de pago inválida').optional() }).parse(req.body ?? {});
+    res.json(await autoInvoiceTicket(res.locals.userId, ticketId, options));
+  });
 
 app.post('/api/tickets/:id/discover', requireSession, checkOrigin, requireCsrf, intensiveLimit, limitIntensiveConcurrency, async (req, res) => {
   const { issuer } = z.object({ issuer: z.string().trim().min(3).max(120) }).parse(req.body);

@@ -1,3 +1,5 @@
+import type { PaymentSuggestion } from '../payment.js';
+
 export type SupportedMimeType =
   | 'application/pdf'
   | 'image/jpeg'
@@ -23,6 +25,8 @@ export interface TicketAnalysis {
   transaccion?: string | null;
   marca?: string | null;
   totalSinPropina?: number | null;
+  formaPagoSugerida?: PaymentSuggestion | null;
+  formaPagoUsuario?: (PaymentSuggestion & { confirmada?: boolean }) | null;
 }
 
 export interface CsfAnalysis {

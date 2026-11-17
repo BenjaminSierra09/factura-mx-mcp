@@ -12,7 +12,7 @@ Cada comercio tiene un proceso distinto. Hay atajos para algunos emisores conoci
 - Solicitar una factura por correo cuando el emisor lo pide, usando el SMTP del usuario y un destinatario que éste haya revisado.
 - Ofrecer herramientas MCP con tokens personales para consultar tickets y trabajos e iniciar trámites desde un agente.
 
-**Tu intervención sigue siendo necesaria** para revisar datos y destinos, pulsar el control final de envío o emisión y resolver un CAPTCHA si aparece. La aplicación no intenta saltarse CAPTCHA.
+**Tu intervención sigue siendo necesaria** cuando faltan datos, el destino no es confiable, el portal pide confirmar el envío final o aparece un CAPTCHA. La aplicación no intenta saltarse CAPTCHA.
 
 ## 🚀 Empezar
 
@@ -39,12 +39,25 @@ npm run dev
 
 Después abre [http://127.0.0.1:8787](http://127.0.0.1:8787). Cada usuario puede guardar su propia API key de OpenAI; es opcional para la lectura local y necesaria para las funciones de IA. Los modelos se pueden ajustar con `OPENAI_DISCOVERY_MODEL`, `FACTURADOR_VISION_MODEL` y `FACTURADOR_BROWSER_MODEL`.
 
+### Protección del acceso con reCAPTCHA
+
+Registro e inicio de sesión aceptan **Google reCAPTCHA v2 (casilla «No soy un robot»)**. Crea un par de claves en [Google reCAPTCHA](https://www.google.com/recaptcha/admin/create), registra el dominio donde abrirás el panel y configura `RECAPTCHA_SITE_KEY` y `RECAPTCHA_SECRET_KEY`. Para pruebas locales con Node o Docker, añade `localhost` a una clave separada de desarrollo y guarda ambas variables en `.env`. La clave secreta se usa sólo en el servidor: cada respuesta se valida con Google y se comprueba que el dominio coincida con el de la solicitud. [Google indica que los tokens duran dos minutos y sólo se usan una vez](https://developers.google.com/recaptcha/docs/verify).
+
+En local sin claves, el CAPTCHA queda desactivado. Un origen público configurado en `APP_PUBLIC_ORIGIN` o `APP_ALLOWED_HOSTS` **no arranca sin las dos claves**. Conserva además los límites de intentos del servidor; reCAPTCHA no los reemplaza.
+La aplicación permite las [claves de prueba publicadas por Google](https://developers.google.com/recaptcha/docs/faq) sólo en desarrollo local y las rechaza al iniciar un despliegue público.
+
+### Catálogos fiscales y forma de pago
+
+El perfil ofrece selectores para **régimen fiscal** y **uso CFDI**. Las opciones de uso se ajustan al régimen y al tipo de RFC. Los datos corresponden al [catálogo CFDI 4.0 del SAT del 6 de noviembre de 2026](http://omawww.sat.gob.mx/tramitesyservicios/Paginas/documentos/catCFDI_V_4_20261106.xls). La clave **602** no aparece en ese catálogo vigente y por eso no se muestra.
+
+La aplicación también conoce las 22 claves de **forma de pago** (`c_FormaPago`). Éstas son distintas del método de pago PUE/PPD. Lee el ticket y puede sugerir una forma de pago si hay evidencia explícita; también puedes añadir una nota breve, por ejemplo «pagué con tarjeta de débito». Una marca de tarjeta por sí sola no permite distinguir crédito de débito. La sugerencia puede corregirse cuando el trámite requiera revisión; la clave 99 no se asigna por falta de lectura.
+
 ## 🧾 Solicitar una factura paso a paso
 
 1. **Completa el perfil fiscal.** Escribe RFC, nombre o razón social tal como aparecen ante el SAT, código postal fiscal, régimen y uso CFDI. Puedes subir tu constancia para completar campos vacíos, pero revisa el resultado.
-2. **Sube el ticket.** Acepta foto o PDF. La aplicación lee texto y QR localmente y, si configuraste OpenAI, puede analizar la imagen. Corrige cualquier folio, fecha, monto u otro dato mal leído.
-3. **Revisa el portal sugerido.** Hay emisores conocidos como Primera Plus, OXXO, marcas de Alsea y La Comer. Para otros, la búsqueda envía sólo el nombre del emisor, sin RFC, ticket ni constancia. Un enlace de QR o un resultado sin respaldo del dominio oficial queda para revisión.
-4. **Explora e inicia el trámite.** El navegador inspecciona campos y puede pedir más datos del ticket. Si el portal cambia a otro dominio, te pide revisar el destino antes de compartir datos. **Pulsa personalmente el control final** de envío o emisión en la captura y luego continúa el trámite.
+2. **Sube el ticket.** Acepta foto o PDF. La aplicación lee texto y QR localmente y, si configuraste OpenAI, puede analizar la imagen. También puedes indicar cómo pagaste si el comprobante no lo deja claro.
+3. **La aplicación intenta iniciar el trámite.** Detecta emisores conocidos como Primera Plus, OXXO, marcas de Alsea y La Comer, y busca un portal oficial para otros. La búsqueda envía sólo el nombre del emisor, sin RFC, ticket ni constancia. Un enlace de QR o un resultado sin respaldo del dominio oficial queda para revisión. No tienes que elegir manualmente emisor, canal ni token en el flujo normal.
+4. **Atiende sólo lo que falte.** Si el perfil, un dato del ticket o el portal no están claros, el panel te pide la corrección necesaria. El navegador inspecciona campos; si cambia a otro dominio, te pide revisar el destino antes de compartir datos. **Pulsa personalmente el control final** de envío o emisión en la captura y luego continúa el trámite.
 5. **Consulta el resultado.** `completed` indica que se guardó un XML con estructura CFDI 4.0, RFC y UUID, o un PDF con RFC y UUID. Esto **no verifica criptográficamente el sello ni consulta la vigencia ante el SAT**. `submitted` o `email_sent` indican que se envió una solicitud, no que el proveedor ya emitió la factura.
 
 Si aparece un CAPTCHA, resuélvelo desde la captura del panel y continúa. Según el [SAT](https://www.sat.gob.mx/minisitio/Factura/solicita_consideraciones.htm), los datos generales para solicitar CFDI 4.0 son RFC, nombre o razón social, código postal fiscal, régimen y uso CFDI. La constancia y el correo no son requisitos fiscales generales, aunque algunos portales los pueden solicitar.
@@ -64,7 +77,7 @@ Endpoint: http://127.0.0.1:8787/mcp
 Authorization: Bearer fxmcp_...
 ```
 
-Herramientas disponibles: `perfil_fiscal`, `cargar_ticket`, `listar_tickets`, `listar_portales`, `descubrir_portal`, `explorar_portal`, `iniciar_factura`, `consultar_trabajo` y `listar_trabajos`. `iniciar_factura` acepta detección automática del emisor (`provider: "auto"`), una URL HTTPS revisada, correcciones en `ticketData` y un destinatario de correo revisado en `recipientEmail`.
+Herramientas disponibles: `perfil_fiscal`, `catalogos_fiscales`, `sugerir_forma_pago`, `cargar_y_facturar`, `cargar_ticket`, `listar_tickets`, `listar_portales`, `descubrir_portal`, `explorar_portal`, `iniciar_factura`, `consultar_trabajo` y `listar_trabajos`. **`cargar_y_facturar`** sube el ticket e intenta iniciar el trámite en una sola llamada; devuelve el trabajo o el dato que falta. `iniciar_factura` permite correcciones avanzadas en `ticketData`, una URL HTTPS revisada y un destinatario de correo revisado en `recipientEmail`.
 
 El token MCP no devuelve la clave de OpenAI, la contraseña SMTP ni el contenido de la constancia. Si publicas el servicio en un subdominio, el panel mostrará automáticamente el endpoint HTTPS correspondiente.
 
@@ -72,16 +85,16 @@ El token MCP no devuelve la clave de OpenAI, la contraseña SMTP ni el contenido
 
 El archivo `compose.tunnel.yaml` añade un servicio `cloudflared` para publicar el panel y MCP en un subdominio HTTPS, sin abrir un puerto público en el host. Cloudflare [explica cómo crear el túnel y su ruta](https://developers.cloudflare.com/tunnel/get-started/). Wrangler también puede crear y ejecutar túneles, aunque [sus comandos de Tunnel son experimentales](https://developers.cloudflare.com/workers/wrangler/commands/tunnel/); esta aplicación no necesita desplegarse como Worker.
 
-1. **Prepara el acceso.** Crea tu cuenta en el panel local primero. Al activar el túnel, el registro de cuentas nuevas queda desactivado por defecto (`ALLOW_REGISTRATION=false`).
+1. **Prepara el acceso.** El registro público queda activado con reCAPTCHA y límites de intentos. Si sólo quieres cuentas invitadas, crea las cuentas en el panel local y configura `ALLOW_REGISTRATION=false` antes de activar el túnel.
 2. **Configura Cloudflare.** Crea un túnel remoto y una ruta publicada para, por ejemplo, `facturas.tudominio.com` hacia `http://factura-mx:8787`. Verifica que el DNS del subdominio apunte al túnel. Conserva el encabezado `Host` público; si configuras `httpHostHeader`, usa el mismo subdominio.
-3. **Guarda la configuración.** Copia `.env.tunnel.example` a `.env.tunnel`, escribe el subdominio exacto en `APP_TUNNEL_HOSTNAME`, pega el token del túnel en `CLOUDFLARE_TUNNEL_TOKEN` y ejecuta `chmod 600 .env.tunnel`. Compose lo monta como secreto para el usuario del contenedor. No subas este archivo: [el token permite ejecutar una réplica del túnel](https://developers.cloudflare.com/tunnel/reference/tunnel-tokens/).
+3. **Guarda la configuración.** Copia `.env.tunnel.example` a `.env.tunnel`, escribe el subdominio exacto en `APP_TUNNEL_HOSTNAME`, pega el token del túnel en `CLOUDFLARE_TUNNEL_TOKEN` y las claves de reCAPTCHA v2 en `RECAPTCHA_SITE_KEY` y `RECAPTCHA_SECRET_KEY`. Registra ese mismo subdominio en Google reCAPTCHA. Ejecuta `chmod 600 .env.tunnel`. Compose monta los dos secretos en sus respectivos contenedores. No subas este archivo: [el token permite ejecutar una réplica del túnel](https://developers.cloudflare.com/tunnel/reference/tunnel-tokens/).
 4. **Inicia los servicios:**
 
 ```bash
 docker compose --env-file .env.tunnel -f compose.yaml -f compose.tunnel.yaml up --build -d
 ```
 
-Prueba `https://facturas.tudominio.com/healthz` y entra al panel en ese mismo origen. La configuración activa cookies `Secure` y permite el subdominio elegido. El puerto local sigue ligado a `127.0.0.1`. En un despliegue con muchos usuarios, hay que revisar el límite de inicio de sesión por IP tras el conector y mover OCR y exploración a trabajos asíncronos para evitar tiempos de espera del proxy.
+Prueba `https://facturas.tudominio.com/healthz` y entra al panel en ese mismo origen. La configuración activa cookies `Secure` y permite el subdominio elegido. El puerto local sigue ligado a `127.0.0.1`. Los intentos de acceso se limitan por correo y por IP del conector; antes de usar varias instancias hay que compartir el almacenamiento de límites. OCR y exploración deberán pasar a trabajos asíncronos para evitar tiempos de espera del proxy en un despliegue intensivo.
 
 ## 🔒 Datos, seguridad y límites
 

@@ -15,6 +15,7 @@ import { detectPortal, getPortalDefinition, type ProviderId } from './portals/in
 import type { TicketAnalysis } from './ingest/types.js';
 import type { DiscoveryResult } from './discovery/index.js';
 import { sendInvoiceEmail, type InvoiceEmailAttachment } from './email/index.js';
+import { isFormaPago, isRegimenCompatible, isUsoCfdiCompatible } from './fiscalCatalogs.js';
 
 const PRIMERA_URL = 'https://www.facturaelectronicagfa.mx/';
 const PRIMERA_EMAIL = 'cfdiboletoprimeraplus@flecha-amarilla.com';
@@ -110,7 +111,9 @@ function setStatus(jobId: string, status: JobRow['status'], error: string | null
 }
 
 function validateFiscal(profile: ProfileRow): void {
-  if (!/^[A-Z&Ñ]{3,4}\d{6}[A-Z0-9]{3}$/.test(profile.rfc) || !profile.nombre || !/^\d{5}$/.test(profile.codigo_postal) || !/^\d{3}$/.test(profile.regimen_fiscal) || !profile.uso_cfdi || !profile.factura_email) {
+  if (!/^[A-Z&Ñ]{3,4}\d{6}[A-Z0-9]{3}$/.test(profile.rfc) || !profile.nombre || !/^\d{5}$/.test(profile.codigo_postal) ||
+      !isRegimenCompatible(profile.regimen_fiscal, profile.rfc) ||
+      !isUsoCfdiCompatible(profile.uso_cfdi, profile.regimen_fiscal, profile.rfc) || !profile.factura_email) {
     throw new Error('Completa y revisa tu perfil fiscal antes de facturar');
   }
 }
@@ -124,6 +127,7 @@ function normalizeTicketData(analysis: TicketAnalysis, edits?: JobRequest['ticke
     if (typeof value === 'string' && value.trim()) values[key] = value.trim();
     else if (typeof value === 'number' && Number.isFinite(value)) values[key] = value;
   }
+  if (analysis.formaPagoSugerida?.confianza === 'alta') values.formaPago = analysis.formaPagoSugerida.codigo;
   for (const [key, value] of Object.entries(edits ?? {})) {
     if (!/^[\p{L}\p{N}_ .-]{1,80}$/u.test(key) || ['__proto__', 'prototype', 'constructor'].includes(key.toLowerCase()))
       throw new Error('Nombre de dato del ticket inválido');
@@ -133,6 +137,10 @@ function normalizeTicketData(analysis: TicketAnalysis, edits?: JobRequest['ticke
     throw new Error('Dato del ticket inválido');
   }
   if (Object.keys(values).length > 40) throw new Error('Demasiados campos del ticket');
+  if (values.formaPago !== undefined && values.formaPago !== null &&
+      (typeof values.formaPago !== 'string' || !isFormaPago(values.formaPago))) {
+    throw new Error('Forma de pago inválida');
+  }
   return values;
 }
 
@@ -275,6 +283,7 @@ async function sendReviewedEmail(row: JobRow, request: StoredJobRequest, profile
     fiscal: { rfc: profile.rfc, razonSocial: profile.nombre, codigoPostal: profile.codigo_postal,
       regimenFiscal: profile.regimen_fiscal, usoCfdi: profile.uso_cfdi,
       email: profile.factura_email, domicilio: profile.domicilio },
+    formaPago: typeof request.ticketData.formaPago === 'string' ? request.ticketData.formaPago : undefined,
     ticket: emailAttachment(row.user_id, ticket.file_id),
     ...(request.includeCsf && profile.csf_file_id ? { csf: emailAttachment(row.user_id, profile.csf_file_id) } : {}),
   });

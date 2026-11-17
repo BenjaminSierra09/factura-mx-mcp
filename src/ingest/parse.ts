@@ -1,4 +1,5 @@
 import type { CsfAnalysis, TicketAnalysis } from './types.js';
+import { suggestPaymentForm } from '../payment.js';
 
 function clean(value: string | null | undefined, maxLength = 160): string | null {
   if (!value) return null;
@@ -115,6 +116,7 @@ export function parseTicketText(text: string, qrData?: string | null): TicketAna
     url,
     numeroTicket, numeroTienda, fechaVenta: normaliseDate(fechaVentaText), horaVenta,
     folioVenta, idVenta, caja, transaccion, marca, totalSinPropina,
+    formaPagoSugerida: suggestPaymentForm(text),
   };
 }
 
@@ -182,6 +184,7 @@ export function mergeTicket(local: TicketAnalysis, vision: Partial<TicketAnalysi
     transaccion: local.transaccion ?? clean(vision.transaccion, 40) ?? parsedVision.transaccion,
     marca: local.marca ?? clean(vision.marca, 80) ?? parsedVision.marca,
     totalSinPropina: local.totalSinPropina ?? normaliseAmount(vision.totalSinPropina) ?? parsedVision.totalSinPropina,
+    formaPagoSugerida: local.formaPagoSugerida ?? parsedVision.formaPagoSugerida,
   };
 }
 

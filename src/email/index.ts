@@ -2,6 +2,7 @@ import path from 'node:path';
 import nodemailer from 'nodemailer';
 import * as z from 'zod/v4';
 import { assertPublicHostname } from '../validation.js';
+import { isFormaPago } from '../fiscalCatalogs.js';
 
 export interface InvoiceEmailAttachment {
   filename: string;
@@ -31,6 +32,7 @@ export interface InvoiceEmailInput {
     domicilio?: string;
   };
   ticket: InvoiceEmailAttachment;
+  formaPago?: string;
   csf?: InvoiceEmailAttachment;
 }
 
@@ -109,6 +111,7 @@ export function buildInvoiceEmail(input: InvoiceEmailInput): EmailMessage {
   const domicilio = fiscal.domicilio?.trim()
     ? cleanText(fiscal.domicilio, 'Domicilio fiscal', 500) : null;
   const ticket = validateAttachment(input.ticket, 'ticket');
+  if (input.formaPago && !isFormaPago(input.formaPago)) throw new Error('Forma de pago inválida');
   const csf = input.csf ? validateAttachment(input.csf, 'constancia') : null;
   if (ticket.content.length + (csf?.content.length ?? 0) > 25 * 1024 * 1024) {
     throw new Error('Los adjuntos superan 25 MB');
@@ -121,6 +124,7 @@ export function buildInvoiceEmail(input: InvoiceEmailInput): EmailMessage {
     `Código postal fiscal: ${fiscal.codigoPostal}`,
     `Régimen fiscal: ${fiscal.regimenFiscal}`,
     `Uso CFDI: ${fiscal.usoCfdi}`,
+    ...(input.formaPago ? [`Forma de pago: ${input.formaPago}`] : []),
     `Correo para recibir la factura: ${replyTo}`,
     ...(domicilio ? [`Domicilio fiscal: ${domicilio}`] : []),
     '',

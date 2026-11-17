@@ -1,10 +1,22 @@
 import { createMcpHandler, McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 import { getProfile } from './db.js';
-import { createTicket, discoverTicket, exploreTicket, listTickets, publicProfile } from './service.js';
+import { createTicket, discoverTicket, exploreTicket, getTicket, listTickets, publicProfile } from './service.js';
 import { createInvoiceJob, getJob, getJobEvents, listJobs } from './jobs.js';
 import { listPortals } from './portals/index.js';
 import { publicInputErrorMessage } from './errors.js';
+import { fiscalCatalogSource, formasPago, regimenes, usosCfdi } from './fiscalCatalogs.js';
+import { suggestPaymentForm } from './payment.js';
+import { autoInvoiceTicket } from './autoInvoice.js';
+
+const ticketFileInput = z.object({ filename: z.string().min(1).max(200), base64: z.string().min(4).max(7_000_000) });
+
+function decodeTicketFile(base64: string): Buffer {
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(base64)) throw new Error('Base64 inválido');
+  const data = Buffer.from(base64, 'base64');
+  if (data.length > 5 * 1024 * 1024) throw new Error('El ticket supera 5 MB');
+  return data;
+}
 
 function answer(value: unknown) {
   return { content: [{ type: 'text' as const, text: JSON.stringify(value) }] };
@@ -27,16 +39,37 @@ function createServer(userId: string): McpServer {
     catch (cause) { return error(cause); }
   });
 
+  server.registerTool('catalogos_fiscales', {
+    title: 'Catálogos fiscales SAT',
+    description: 'Consulta las claves vigentes de régimen fiscal, uso CFDI y forma de pago, con compatibilidad por tipo de persona y régimen. Forma de pago no es el método PUE/PPD.',
+  }, async () => answer({ source: fiscalCatalogSource, regimenes, formasPago, usosCfdi }));
+
+  server.registerTool('sugerir_forma_pago', {
+    title: 'Sugerir forma de pago',
+    description: 'Interpreta una descripción breve que aporta el usuario, por ejemplo «pagué con tarjeta de débito». Devuelve una sugerencia con evidencia o null si es ambigua; el usuario debe confirmarla.',
+    inputSchema: z.object({ textoAdicional: z.string().trim().min(1).max(500) }),
+  }, async ({ textoAdicional }) => answer({ sugerencia: suggestPaymentForm(textoAdicional, 'usuario') }));
+
   server.registerTool('cargar_ticket', {
     title: 'Cargar ticket',
-    description: 'Guarda un boleto o ticket PDF/JPEG/PNG/WebP del usuario y extrae datos y QR. Base64 sin prefijo data:. Máximo 5 MB.',
-    inputSchema: z.object({ filename: z.string().min(1).max(200), base64: z.string().min(4).max(7_000_000) }),
+    description: 'Sólo guarda un boleto o ticket PDF/JPEG/PNG/WebP y extrae datos y QR; no inicia la facturación. Base64 sin prefijo data:. Máximo 5 MB.',
+    inputSchema: ticketFileInput,
   }, async ({ filename, base64 }) => {
     try {
-      if (!/^[A-Za-z0-9+/]+={0,2}$/.test(base64)) throw new Error('Base64 inválido');
-      const data = Buffer.from(base64, 'base64');
-      if (data.length > 5 * 1024 * 1024) throw new Error('El ticket supera 5 MB');
-      return answer(await createTicket(userId, filename, data));
+      return answer(await createTicket(userId, filename, decodeTicketFile(base64)));
+    } catch (cause) { return error(cause); }
+  });
+
+  server.registerTool('cargar_y_facturar', {
+    title: 'Cargar ticket e iniciar facturación automática',
+    description: 'Guarda un ticket PDF/JPEG/PNG/WebP, lee sus datos y QR, identifica emisor y portal oficial e intenta iniciar el trámite. Si falta perfil, portal confiable o un dato, devuelve needs_review sin enviar información fiscal. Base64 sin prefijo data:. Máximo 5 MB.',
+    inputSchema: ticketFileInput.extend({ textoAdicional: z.string().trim().max(500).optional() }),
+  }, async ({ filename, base64, textoAdicional }) => {
+    try {
+      const uploaded = await createTicket(userId, filename, decodeTicketFile(base64));
+      const result = await autoInvoiceTicket(userId, uploaded.ticket.id, { textoAdicional });
+      return answer({ ticket: getTicket(userId, uploaded.ticket.id) ?? uploaded.ticket, result,
+        ...(uploaded.warning ? { warning: uploaded.warning } : {}) });
     } catch (cause) { return error(cause); }
   });
 
@@ -76,7 +109,7 @@ function createServer(userId: string): McpServer {
 
   server.registerTool('iniciar_factura', {
     title: 'Iniciar facturación',
-    description: 'Inicia una solicitud de CFDI 4.0. Detecta el emisor y usa el portal conocido o uno descubierto con fuente oficial; para un emisor desconocido puede darse portalUrl revisada. ticketData permite corregir la extracción OCR y aportar otros campos. El canal email usa destinatario fijo de Primera Plus o recipientEmail revisado para otros emisores, con SMTP del usuario. No repite tickets ya enviados.',
+    description: 'Inicia una solicitud de CFDI 4.0. Detecta el emisor y usa el portal conocido o uno descubierto con fuente oficial; para un emisor desconocido puede darse portalUrl revisada. ticketData permite corregir la extracción OCR, incluida ticketData.formaPago con una clave de c_FormaPago confirmada por el usuario. El canal email usa destinatario fijo de Primera Plus o recipientEmail revisado para otros emisores, con SMTP del usuario. No repite tickets ya enviados.',
     inputSchema: z.object({
       ticketId: z.uuid(), provider: z.enum(['auto','primera_plus','oxxo','alsea','la_comer','generic']).default('auto'),
       portalUrl: z.url().optional(), token: z.string().optional(),

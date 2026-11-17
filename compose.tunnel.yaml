@@ -5,7 +5,16 @@ services:
     environment:
       APP_PUBLIC_ORIGIN: "https://${APP_TUNNEL_HOSTNAME:?Define APP_TUNNEL_HOSTNAME}"
       APP_ALLOWED_HOSTS: "localhost,127.0.0.1,${APP_TUNNEL_HOSTNAME:?Define APP_TUNNEL_HOSTNAME}"
-      ALLOW_REGISTRATION: "${ALLOW_REGISTRATION:-false}"
+      ALLOW_REGISTRATION: "${ALLOW_REGISTRATION:-true}"
+      RECAPTCHA_SITE_KEY: "${RECAPTCHA_SITE_KEY:?Define RECAPTCHA_SITE_KEY}"
+      RECAPTCHA_SECRET_KEY: ""
+      RECAPTCHA_SECRET_KEY_FILE: /run/secrets/recaptcha_secret_key
+    secrets:
+      - source: recaptcha_secret_key
+        target: recaptcha_secret_key
+        uid: "1000"
+        gid: "1000"
+        mode: 0o400
 
   cloudflared:
     image: cloudflare/cloudflared:2026.11.0
@@ -25,3 +34,5 @@ services:
 secrets:
   cloudflare_tunnel_token:
     environment: CLOUDFLARE_TUNNEL_TOKEN
+  recaptcha_secret_key:
+    environment: RECAPTCHA_SECRET_KEY

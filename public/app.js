@@ -6,6 +6,7 @@
     csrfToken: '',
     profile: null,
     portals: [],
+    fiscalCatalogs: null,
     tickets: [],
     jobs: [],
     tokens: [],
@@ -15,8 +16,19 @@
     selectedJob: null,
     panel: 'overview',
     registerMode: false,
+    registrationEnabled: true,
+    recaptchaSiteKey: null,
+    recaptchaReady: false,
+    recaptchaConfigLoaded: false,
+    recaptchaConfigError: false,
+    recaptchaWidgets: { login: null, register: null },
     toastTimer: null,
     fieldEdits: new Map(),
+    paymentSuggestions: new Map(),
+    paymentHints: new Map(),
+    paymentEdits: new Map(),
+    pendingAutoTicketId: '',
+    autoReviewReason: '',
     urlEdits: new Map(),
     providerEdits: new Map(),
     exploring: new Set(),
@@ -82,6 +94,7 @@
   function showAuth() {
     $('#auth-view').hidden = false;
     $('#app-view').hidden = true;
+    setAuthMode(false);
     $('#auth-email').focus();
   }
 
@@ -95,7 +108,8 @@
   }
 
   function setAuthMode(register) {
-    state.registerMode = register;
+    state.registerMode = register && state.registrationEnabled;
+    register = state.registerMode;
     $('#auth-title').textContent = register ? 'Crea tu cuenta' : 'Inicia sesión';
     $('#auth-subtitle').textContent = register ? 'Tus datos fiscales quedarán en tu espacio privado.' : 'Accede a tus tickets, facturas y datos fiscales.';
     $('#auth-submit').textContent = register ? 'Crear cuenta' : 'Entrar';
@@ -105,6 +119,64 @@
     $('#auth-password').autocomplete = register ? 'new-password' : 'current-password';
     $('#auth-confirm').required = register;
     $('#auth-error').hidden = true;
+    syncRecaptcha();
+  }
+
+  function showAuthError(message) {
+    const errorBox = $('#auth-error');
+    errorBox.textContent = message;
+    errorBox.hidden = false;
+  }
+
+  function syncRecaptcha() {
+    const mode = state.registerMode ? 'register' : 'login';
+    for (const name of ['login', 'register']) {
+      const container = $(`#${name}-recaptcha`);
+      if (container) container.hidden = !state.recaptchaSiteKey || name !== mode;
+    }
+    if (!state.recaptchaSiteKey || !state.recaptchaReady || $('#auth-view').hidden) return;
+    if (state.recaptchaWidgets[mode] !== null) return;
+    const container = $(`#${mode}-recaptcha`);
+    if (!container || !window.grecaptcha?.render) return;
+    try {
+      state.recaptchaWidgets[mode] = window.grecaptcha.render(container, {
+        sitekey: state.recaptchaSiteKey,
+        theme: 'light',
+        size: window.innerWidth < 360 ? 'compact' : 'normal',
+        'expired-callback': () => { if ((state.registerMode ? 'register' : 'login') === mode) showAuthError('La verificación expiró. Marca la casilla otra vez.'); },
+        'error-callback': () => { if ((state.registerMode ? 'register' : 'login') === mode) showAuthError('No se pudo cargar la verificación. Revisa tu conexión e inténtalo de nuevo.'); },
+      });
+    } catch {
+      showAuthError('No se pudo cargar la verificación. Recarga la página e inténtalo de nuevo.');
+    }
+  }
+
+  async function loadAuthConfiguration() {
+    try {
+      const config = await api('/api/config');
+      state.registrationEnabled = config.registrationEnabled !== false;
+      $('.auth-switch').hidden = !state.registrationEnabled;
+      if (!state.registrationEnabled && state.registerMode) setAuthMode(false);
+      state.recaptchaSiteKey = typeof config.recaptchaSiteKey === 'string' && config.recaptchaSiteKey ? config.recaptchaSiteKey : null;
+      if (state.recaptchaSiteKey) {
+        window.facturaRecaptchaReady = () => {
+          state.recaptchaReady = true;
+          syncRecaptcha();
+        };
+        const script = document.createElement('script');
+        script.src = 'https://www.google.com/recaptcha/api.js?onload=facturaRecaptchaReady&render=explicit&hl=es-419';
+        script.async = true;
+        script.defer = true;
+        script.onerror = () => showAuthError('No se pudo cargar la verificación. Revisa tu conexión e inténtalo de nuevo.');
+        document.head.append(script);
+      }
+    } catch {
+      state.recaptchaConfigError = true;
+      showAuthError('No se pudo preparar el inicio de sesión. Recarga la página e inténtalo de nuevo.');
+    } finally {
+      state.recaptchaConfigLoaded = true;
+      syncRecaptcha();
+    }
   }
 
   async function handleAuth(event) {
@@ -114,21 +186,40 @@
     const errorBox = $('#auth-error');
     errorBox.hidden = true;
     if (!$('#auth-form').reportValidity()) return;
+    if (!state.recaptchaConfigLoaded || state.recaptchaConfigError) {
+      showAuthError('No se pudo preparar el inicio de sesión. Recarga la página e inténtalo de nuevo.');
+      return;
+    }
     if (state.registerMode && password !== $('#auth-confirm').value) {
-      errorBox.textContent = 'Las contraseñas no coinciden.';
-      errorBox.hidden = false;
+      showAuthError('Las contraseñas no coinciden.');
       $('#auth-confirm').focus();
       return;
     }
+    const mode = state.registerMode ? 'register' : 'login';
+    const widgetId = state.recaptchaWidgets[mode];
+    let recaptchaToken;
+    if (state.recaptchaSiteKey) {
+      if (!state.recaptchaReady || widgetId === null || !window.grecaptcha?.getResponse) {
+        showAuthError('La verificación aún no está lista. Espera un momento o recarga la página.');
+        return;
+      }
+      recaptchaToken = window.grecaptcha.getResponse(widgetId);
+      if (!recaptchaToken) {
+        showAuthError('Marca la casilla «No soy un robot» para continuar.');
+        return;
+      }
+    }
     try {
       await withPending($('#auth-submit'), async () => {
-        await api(`/api/auth/${state.registerMode ? 'register' : 'login'}`, { method: 'POST', body: { email, password } });
+        await api(`/api/auth/${mode}`, { method: 'POST', body: { email, password, ...(recaptchaToken ? { recaptchaToken } : {}) } });
         $('#auth-form').reset();
         await initializeSession();
       });
     } catch (error) {
       errorBox.textContent = error.message;
       errorBox.hidden = false;
+    } finally {
+      if (widgetId !== null && window.grecaptcha?.reset) window.grecaptcha.reset(widgetId);
     }
   }
 
@@ -138,19 +229,22 @@
       state.me = me.user || me;
       state.csrfToken = me.csrfToken;
       showApp();
-      const [profile, tickets, jobs, portals] = await Promise.all([
+      const [profile, tickets, jobs, portals, fiscalCatalogs] = await Promise.all([
         api('/api/profile'), api('/api/tickets'), api('/api/jobs'),
         api('/api/portals').catch(() => []),
+        api('/api/fiscal-catalogs').catch(() => null),
       ]);
       state.profile = profile.profile || profile;
       state.tickets = tickets.tickets || tickets;
       state.jobs = jobs.jobs || jobs;
       state.portals = Array.isArray(portals) ? portals : portals.portals || [];
+      state.fiscalCatalogs = fiscalCatalogs;
       renderProviderOptions();
       renderProfile();
       renderTickets();
       renderJobs();
       renderOverview();
+      if (!fiscalCatalogs) notify('No pudimos cargar el catálogo fiscal. Recarga la página antes de guardar el perfil.', 'error');
     } catch (error) {
       if (error.status === 401) { state.me = null; state.csrfToken = ''; showAuth(); }
       else { notify(error.message || 'No se pudieron cargar tus datos.', 'error'); }
@@ -183,13 +277,68 @@
     `).join('') : '<p class="empty-inline">Todavía no hay trámites. Carga tu primer ticket para comenzar.</p>';
   }
 
+  function setCatalogOptions(select, entries, current, placeholder) {
+    select.innerHTML = `<option value="">${escapeHtml(placeholder)}</option>` + entries.map(item =>
+      `<option value="${escapeHtml(item.codigo)}">${escapeHtml(item.codigo)} · ${escapeHtml(item.nombre)}</option>`).join('');
+    select.value = entries.some(item => item.codigo === current) ? current : '';
+  }
+
+  function renderFiscalSelects(regimen = $('#profile-regimen').value, uso = $('#profile-uso').value) {
+    const catalogs = state.fiscalCatalogs;
+    if (!catalogs) return;
+    const rfc = $('#profile-rfc').value.trim().toUpperCase();
+    const persona = rfc.length === 12 ? 'moral' : rfc.length === 13 ? 'fisica' : null;
+    const regimenes = catalogs.regimenes.filter(item => !persona || item.personas === 'ambas' || item.personas === persona);
+    setCatalogOptions($('#profile-regimen'), regimenes, regimen, 'Selecciona tu régimen');
+    const selectedRegimen = $('#profile-regimen').value;
+    const usos = catalogs.usosCfdi.filter(item => selectedRegimen && item.regimenes.includes(selectedRegimen) &&
+      (!persona || item.personas === 'ambas' || item.personas === persona));
+    setCatalogOptions($('#profile-uso'), usos, uso, selectedRegimen ? 'Selecciona el uso CFDI' : 'Elige primero tu régimen');
+    $('#profile-uso').disabled = !selectedRegimen;
+    $('#profile-regimen-hint').textContent = regimen && !regimenes.some(item => item.codigo === regimen)
+      ? 'El régimen guardado ya no es compatible con este RFC o no está vigente. Selecciona otro.'
+      : 'Mostramos los regímenes vigentes compatibles con tu RFC.';
+    $('#profile-uso-hint').textContent = uso && selectedRegimen && !usos.some(item => item.codigo === uso)
+      ? 'El uso guardado no corresponde a este régimen. Selecciona uno compatible.'
+      : 'Las opciones se ajustan al régimen elegido.';
+  }
+
+  function renderPaymentOptions(ticket) {
+    const select = $('#job-forma-pago');
+    const options = state.fiscalCatalogs?.formasPago || [];
+    const printed = ticket?.analysis?.formaPagoSugerida;
+    const supplied = ticket?.analysis?.formaPagoUsuario;
+    const conflict = printed?.confianza === 'alta' && supplied?.confianza === 'alta' &&
+      printed.codigo !== supplied.codigo && !supplied.confirmada;
+    let suggestion = null;
+    if (ticket && !conflict) {
+      const preferred = supplied?.confirmada || (supplied && printed?.confianza !== 'alta')
+        ? supplied : printed || supplied;
+      suggestion = state.paymentSuggestions.get(ticket.id) || preferred || null;
+    }
+    const selected = ticket && state.paymentEdits.has(ticket.id) ? state.paymentEdits.get(ticket.id)
+      : suggestion?.confianza === 'alta' ? suggestion.codigo : '';
+    setCatalogOptions(select, options, selected, 'Elegir según el ticket');
+    const note = $('#ticket-payment-suggestion');
+    note.hidden = !suggestion && !conflict;
+    if (conflict) note.textContent = `Hay dos señales de pago distintas: ${printed.codigo} en el ticket y ${supplied.codigo} en tu información adicional. Confirma la correcta antes de continuar.`;
+    else if (suggestion) {
+      const label = options.find(item => item.codigo === suggestion.codigo)?.nombre || suggestion.codigo;
+      note.textContent = `Forma de pago sugerida: ${suggestion.codigo} · ${label}. ${suggestion.evidencia || 'Revisa el ticket para confirmarla.'}`;
+    }
+    $('#job-payment-help').textContent = conflict
+      ? 'El ticket y tu nota se contradicen. Selecciona la forma correcta.'
+      : suggestion
+      ? `Sugerimos ${suggestion.codigo} por: ${suggestion.evidencia}. Puedes corregirlo aquí antes de reintentar.`
+      : 'Elige la forma de pago sólo si el ticket o tu información adicional la confirman.';
+  }
+
   function renderProfile() {
     const p = state.profile || {};
     $('#profile-rfc').value = p.rfc || '';
     $('#profile-cp').value = p.codigoPostal || '';
     $('#profile-name').value = p.nombre || '';
-    $('#profile-regimen').value = p.regimenFiscal || '';
-    $('#profile-uso').value = p.usoCfdi || '';
+    renderFiscalSelects(p.regimenFiscal || '', p.usoCfdi || '');
     $('#profile-email').value = p.facturaEmail || '';
     $('#profile-address').value = p.domicilio || '';
     $('#csf-status').textContent = p.hasCsf ? 'Constancia guardada' : 'Sin archivo';
@@ -223,6 +372,7 @@
         $('#profile-save-status').textContent = 'Guardado';
         notify('Perfil fiscal guardado.');
       });
+      if (state.pendingAutoTicketId) void startAutoInvoice(state.pendingAutoTicketId);
     } catch { /* toast from withPending */ }
   }
 
@@ -418,7 +568,7 @@
   function renderTicketAnalysis() {
     const ticket = currentTicket();
     $('#ticket-analysis-card').hidden = !ticket;
-    if (!ticket) { $('#job-ticket-fields').innerHTML = ''; return; }
+    if (!ticket) { $('#job-ticket-fields').innerHTML = ''; $('#ticket-payment-suggestion').hidden = true; return; }
     const a = ticket.analysis || {};
     const fields = [
       ['Empresa', a.empresa], ['Folio', a.folio], ['Fecha', a.fecha],
@@ -430,20 +580,27 @@
       .map(([label, value]) => `<div class="analysis-item ${label === 'QR o URL' ? 'full-span' : ''}"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value ?? 'No detectado')}</strong></div>`).join('');
     const detected = [a.empresa, a.folio, a.fecha, a.monto, a.referencia, a.qrUrl, a.url].some(value => value != null && value !== '');
     $('#ticket-analysis-card .inline-note').textContent = detected
-      ? 'La lectura del ticket puede ser imprecisa. Comprueba los datos y el sitio antes de iniciar el trámite.'
-      : 'No pudimos leer suficientes datos. Puedes subir una imagen más clara o escribirlos en el formulario.';
+      ? 'La lectura del ticket puede ser imprecisa. Si falta algo, te pediremos corregirlo.'
+      : 'No pudimos leer suficientes datos. Puedes subir una imagen más clara o completar los campos que te pidamos.';
     const provider = state.providerEdits.get(ticket.id) || suggestedProvider(ticket);
     $('#job-provider').value = [...$('#job-provider').options].some(option => option.value === provider) ? provider : 'auto';
     $('#job-url').value = state.urlEdits.has(ticket.id) ? state.urlEdits.get(ticket.id) : reviewedPortalUrl(ticket);
     renderPortalReview(ticket);
     updateJobOptions();
-    if (suggestedPortalUrl(ticket) && !ticket.exploration && !state.explorationAttempted.has(ticket.id)) {
-      state.explorationAttempted.add(ticket.id);
-      void exploreTicket(null, true);
-    }
-    if (!reviewedPortalUrl(ticket) && a.empresa && !ticket.discovery && !state.discoveryAttempted.has(ticket.id)) {
-      state.discoveryAttempted.add(ticket.id);
-      void runDiscovery(ticket, a.empresa, null, true);
+    renderPaymentOptions(ticket);
+    const job = state.jobs.find(item => item.ticketId === ticket.id);
+    const paymentConflict = a.formaPagoSugerida?.confianza === 'alta' && a.formaPagoUsuario?.confianza === 'alta' &&
+      a.formaPagoSugerida.codigo !== a.formaPagoUsuario.codigo && !a.formaPagoUsuario.confirmada;
+    if (!job) {
+      state.pendingAutoTicketId = ticket.id;
+      showInvoiceReview(paymentConflict ? 'payment' : 'other', paymentConflict
+        ? 'El ticket y tu información adicional indican formas de pago distintas. Confirma cuál aparece en el comprobante.'
+        : 'Este ticket aún no tiene un trámite iniciado. Reintenta la detección automática cuando estés listo.');
+    } else if (job.status === 'failed') {
+      state.pendingAutoTicketId = ticket.id;
+      showInvoiceReview('other', 'El trámite anterior no se completó. Revisa el resultado antes de volver a intentarlo.');
+    } else if (state.pendingAutoTicketId !== ticket.id) {
+      $('#invoice-review-card').hidden = true;
     }
   }
 
@@ -464,6 +621,7 @@
       const work = async () => {
         const response = await api(`/api/tickets/${encodeURIComponent(ticket.id)}/discover`, { method: 'POST', body: { issuer } });
         replaceTicket(response.ticket || response);
+        if (state.pendingAutoTicketId === ticket.id && currentTicket()?.discovery?.selected) void startAutoInvoice(ticket.id);
         if (!automatic) {
           if (currentTicket()?.discovery?.selected) notify('Encontramos una dirección candidata. Comprueba la fuente.');
           else notify('No encontramos un portal verificado. Puedes escribir la dirección oficial.', 'error');
@@ -506,10 +664,66 @@
     }
   }
 
+  function showInvoiceReview(reason, message) {
+    state.autoReviewReason = reason || 'other';
+    $('#invoice-review-card').hidden = false;
+    $('#invoice-review-message').textContent = message || 'Necesitamos confirmar un dato antes de continuar.';
+    $('#invoice-review-profile').hidden = !['profile', 'openai_key'].includes(reason);
+    $('#invoice-review-retry').hidden = false;
+    $('#invoice-manual-details').hidden = ['profile', 'openai_key'].includes(reason);
+    $('#invoice-manual-details').open = reason === 'payment' || reason === 'ticket_data';
+    $('#portal-help-details').open = reason === 'issuer' || reason === 'portal';
+    $('#job-forma-pago').required = reason === 'payment';
+    if (reason === 'payment' && state.pendingAutoTicketId) {
+      state.paymentEdits.set(state.pendingAutoTicketId, '');
+      $('#job-forma-pago').value = '';
+    }
+  }
+
+  async function startAutoInvoice(ticketId) {
+    const ticket = state.tickets.find(item => item.id === ticketId);
+    if (!ticket) return;
+    state.pendingAutoTicketId = ticketId;
+    $('#invoice-review-card').hidden = false;
+    $('#invoice-review-message').textContent = 'Identificando el emisor y preparando el trámite…';
+    $('#invoice-review-profile').hidden = true;
+    $('#invoice-review-retry').hidden = true;
+    $('#invoice-manual-details').hidden = true;
+    try {
+      const formaPago = state.paymentEdits.get(ticketId) || '';
+      const response = await api(`/api/tickets/${encodeURIComponent(ticketId)}/auto-invoice`, {
+        method: 'POST', body: { textoAdicional: state.paymentHints.get(ticketId) || '', ...(formaPago ? { formaPago } : {}) },
+      });
+      if (response.ticket) replaceTicket(response.ticket);
+      if (Object.prototype.hasOwnProperty.call(response, 'paymentSuggestion')) {
+        if (response.paymentSuggestion) state.paymentSuggestions.set(ticketId, response.paymentSuggestion);
+        else state.paymentSuggestions.delete(ticketId);
+        if (currentTicket()?.id === ticketId) renderPaymentOptions(currentTicket());
+      }
+      if (response.status === 'started' && response.job?.id) {
+        state.pendingAutoTicketId = '';
+        state.autoReviewReason = '';
+        $('#invoice-review-card').hidden = true;
+        state.selectedJobId = response.job.id;
+        await loadJobs();
+        showPanel('jobs');
+        await loadJobDetail(response.job.id);
+        notify('Iniciamos el trámite desde los datos del ticket. Puedes seguirlo aquí.');
+      } else {
+        showInvoiceReview(response.reason, response.message);
+        notify('El ticket necesita una revisión para continuar.', 'error');
+      }
+    } catch (error) {
+      showInvoiceReview('other', error.message || 'No se pudo iniciar el trámite automáticamente.');
+      notify(error.message || 'No se pudo iniciar el trámite automáticamente.', 'error');
+    }
+  }
+
   async function uploadTicket(event) {
     event.preventDefault();
     const file = $('#ticket-file').files[0];
     if (!file) { notify('Elige un ticket.', 'error'); return; }
+    const paymentHint = $('#ticket-payment-note').value.trim();
     const data = new FormData(); data.append('file', file);
     try {
       await withPending($('#ticket-upload-button'), async () => {
@@ -517,15 +731,15 @@
         const ticket = response.ticket || response;
         state.tickets.unshift(ticket);
         state.selectedTicketId = ticket.id;
+        if (paymentHint) state.paymentHints.set(ticket.id, paymentHint);
         renderTickets();
         renderOverview();
         $('#ticket-file').value = '';
         $('#ticket-file-name').textContent = '';
-        const a = ticket.analysis || {};
-        notify(response.warning || ([a.empresa, a.folio, a.fecha, a.monto, a.referencia, a.qrUrl, a.url].some(value => value != null && value !== '')
-          ? 'Ticket guardado y analizado. Revisa los datos detectados.'
-          : 'Ticket guardado. No se detectaron campos; puedes indicar el token manualmente.'), response.warning ? 'error' : 'success');
+        $('#ticket-payment-note').value = '';
+        if (response.warning) notify(response.warning, 'error');
         $('#ticket-analysis-card').scrollIntoView({ behavior: 'smooth', block: 'center' });
+        await startAutoInvoice(ticket.id);
       });
     } catch { /* toast from withPending */ }
   }
@@ -687,6 +901,7 @@
       const value = input.value.trim();
       if (value) ticketData[input.dataset.ticketKey] = value;
     });
+    if ($('#job-forma-pago').value) ticketData.formaPago = $('#job-forma-pago').value;
     if (Object.keys(ticketData).length) body.ticketData = ticketData;
     const token = $('#job-token').value.trim();
     if (token && body.channel === 'portal' && effectiveProvider(currentTicket()) === 'primera_plus') body.token = token;
@@ -695,6 +910,9 @@
         const response = await api('/api/jobs', { method: 'POST', body });
         const job = response.job || response;
         state.selectedJobId = job.id;
+        state.pendingAutoTicketId = '';
+        state.autoReviewReason = '';
+        $('#invoice-review-card').hidden = true;
         $('#job-token').value = '';
         $('#job-include-csf').checked = false;
         await loadJobs();
@@ -911,6 +1129,8 @@
     try { await api('/api/auth/logout', { method: 'POST' }); }
     catch (error) { notify(error.message, 'error'); }
     state.me = null; state.csrfToken = ''; state.profile = null; state.tickets = []; state.jobs = [];
+    state.fieldEdits.clear(); state.paymentSuggestions.clear(); state.paymentHints.clear(); state.paymentEdits.clear();
+    state.pendingAutoTicketId = ''; state.autoReviewReason = '';
     showAuth();
   }
 
@@ -930,12 +1150,22 @@
     $$('[data-panel]').forEach(button => button.addEventListener('click', () => showPanel(button.dataset.panel)));
     $$('[data-go]').forEach(button => button.addEventListener('click', () => showPanel(button.dataset.go)));
     $('#profile-form').addEventListener('submit', saveFiscalProfile);
+    $('#profile-rfc').addEventListener('input', () => renderFiscalSelects());
+    $('#profile-regimen').addEventListener('change', () => renderFiscalSelects($('#profile-regimen').value, ''));
     $('#csf-form').addEventListener('submit', uploadCsf);
     $('#api-form').addEventListener('submit', saveApiKey);
     $('#smtp-form').addEventListener('submit', saveSmtp);
     $('#csf-file').addEventListener('change', event => { $('#csf-file-name').textContent = event.target.files[0]?.name || ''; });
     $('#ticket-file').addEventListener('change', event => { $('#ticket-file-name').textContent = event.target.files[0]?.name || ''; });
     $('#ticket-upload-form').addEventListener('submit', uploadTicket);
+    $('#invoice-review-retry').addEventListener('click', () => {
+      if (state.autoReviewReason === 'payment' && !$('#job-forma-pago').value) {
+        notify('Selecciona la forma de pago antes de reintentar.', 'error');
+        $('#job-forma-pago').focus();
+        return;
+      }
+      if (state.pendingAutoTicketId) void startAutoInvoice(state.pendingAutoTicketId);
+    });
     $('#job-ticket').addEventListener('change', event => { state.selectedTicketId = event.target.value; renderTicketAnalysis(); });
     $('#portal-discovery-form').addEventListener('submit', discoverTicket);
     $('#portal-suggestion').addEventListener('click', event => {
@@ -979,6 +1209,9 @@
       if (currentTicket()) state.providerEdits.set(currentTicket().id, $('#job-provider').value);
     });
     $('#job-channel').addEventListener('change', updateJobOptions);
+    $('#job-forma-pago').addEventListener('change', event => {
+      if (currentTicket()) state.paymentEdits.set(currentTicket().id, event.target.value);
+    });
     $('#job-ticket-fields').addEventListener('input', event => {
       const input = event.target.closest('[data-ticket-key]');
       const ticket = currentTicket();
@@ -1011,6 +1244,7 @@
 
   bindEvents();
   setAuthMode(false);
+  void loadAuthConfiguration();
   void initializeSession();
   setInterval(async () => {
     if (!state.me || document.hidden) return;

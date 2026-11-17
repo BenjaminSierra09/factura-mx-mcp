@@ -26,6 +26,8 @@ test('API separates users, protects writes, and serves authenticated MCP', { tim
   const base = `http://127.0.0.1:${port}`;
   const child = spawn(process.execPath, ['--import', 'tsx', 'src/server.ts'], {
     cwd: process.cwd(), env: { ...process.env, DATA_DIR: dataDir, PORT: String(port), HOST: '127.0.0.1',
+      APP_PUBLIC_ORIGIN: '', APP_ALLOWED_HOSTS: 'localhost,127.0.0.1',
+      RECAPTCHA_SITE_KEY: '', RECAPTCHA_SECRET_KEY: '', RECAPTCHA_SECRET_KEY_FILE: '',
       API_EXPENSIVE_LIMIT: '2', API_ACTION_LIMIT: '2', API_MCP_LIMIT: '2' }, stdio: 'pipe',
   });
   try {
@@ -36,6 +38,8 @@ test('API separates users, protects writes, and serves authenticated MCP', { tim
       await new Promise(resolve => setTimeout(resolve, 100));
     }
     assert.equal(ready, true, 'server started');
+    const publicConfig = await fetch(`${base}/api/config`).then(response => response.json()) as Record<string, unknown>;
+    assert.deepEqual(publicConfig, { recaptchaSiteKey: null, registrationEnabled: true });
 
     async function register(email: string) {
       const response = await fetch(`${base}/api/auth/register`, { method: 'POST', headers: { 'content-type': 'application/json' },
@@ -95,6 +99,7 @@ test('API separates users, protects writes, and serves authenticated MCP', { tim
     const mcp = await listMcp(token);
     assert.equal(mcp.status, 200);
     const output = await mcp.text();
+    assert.match(output, /cargar_y_facturar/);
     assert.match(output, /iniciar_factura/);
     assert.match(output, /descubrir_portal/);
     assert.match(output, /explorar_portal/);
@@ -106,6 +111,17 @@ test('API separates users, protects writes, and serves authenticated MCP', { tim
     assert.equal(bobTokenResponse.status, 201);
     const { token: bobToken } = await bobTokenResponse.json() as { token: string };
     assert.equal((await listMcp(bobToken)).status, 200, 'another user has a separate MCP quota');
+    const automaticTool = await fetch(`${base}/mcp`, { method: 'POST',
+      headers: { authorization: `Bearer ${bobToken}`, 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call',
+        params: { name: 'cargar_y_facturar', arguments: { filename: 'ticket.png', base64: png.toString('base64'),
+          textoAdicional: 'Pagué en efectivo' } } }),
+    });
+    assert.equal(automaticTool.status, 200);
+    const automaticOutput = await automaticTool.text();
+    assert.match(automaticOutput, /needs_review/, 'the tool returns the next required step');
+    assert.match(automaticOutput, /profile/, 'a missing fiscal profile is identified');
+    assert.match(automaticOutput, /paymentSuggestion/, 'the payment clue is preserved');
 
     const createJob = (account: typeof alice) => fetch(`${base}/api/jobs`, { method: 'POST',
       headers: { cookie: account.cookie, 'x-csrf-token': account.csrf, 'content-type': 'application/json' },
@@ -121,6 +137,15 @@ test('API separates users, protects writes, and serves authenticated MCP', { tim
     assert.equal((await browserAction()).status, 409);
     assert.equal((await browserAction()).status, 409);
     assert.equal((await browserAction()).status, 429, 'browser actions have a separate account quota');
+
+    const invalidLogin = (email: string) => fetch(`${base}/api/auth/login`, { method: 'POST',
+      headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email, password: 'irrelevant' }) });
+    for (let attempt = 0; attempt < 20; attempt++) {
+      assert.equal((await invalidLogin('invalid-address')).status, 400);
+    }
+    assert.equal((await invalidLogin('invalid-address')).status, 429, 'one email is limited');
+    assert.equal((await invalidLogin('another-invalid-address')).status, 400,
+      'another email can still use the shared connector IP');
 
     const externalDb = new Database(path.join(dataDir, 'app.sqlite'));
     try { externalDb.prepare('UPDATE tickets SET analysis_json=? WHERE id=?').run('SENTINEL_SECRET', ticket.id); }

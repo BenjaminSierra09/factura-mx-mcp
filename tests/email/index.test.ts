@@ -25,6 +25,7 @@ function sample(): InvoiceEmailInput {
       filename: '../ticket.pdf', content: Buffer.from('%PDF-ticket'),
       contentType: 'application/pdf',
     },
+    formaPago: '28',
     csf: {
       filename: 'constancia.pdf', content: Buffer.from('%PDF-csf'),
       contentType: 'application/pdf',
@@ -40,6 +41,7 @@ test('compone solicitud fiscal con adjuntos y sin secreto SMTP en el mensaje', (
   assert.equal(message.attachments[0]?.filename, 'ticket.pdf');
   assert.match(message.text, /RFC: XAXX010101000/);
   assert.match(message.text, /Domicilio fiscal: Calle 10/);
+  assert.match(message.text, /Forma de pago: 28/);
   assert.doesNotMatch(JSON.stringify(message), /secreto-smtp/);
 });
 

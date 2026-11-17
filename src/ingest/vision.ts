@@ -68,7 +68,7 @@ async function readWithVision<T>(
 export function readTicketWithVision(buffer: Buffer, mimeType: SupportedMimeType, apiKey: string): Promise<Partial<TicketAnalysis>> {
   return readWithVision<Partial<TicketAnalysis>>(
     buffer, mimeType, apiKey, 'ticket', documentFields,
-    'Transcribe el ticket y extrae sólo campos visibles: empresa, marca, número de ticket, número de tienda, fecha/hora de venta, folio de venta, ID de venta, caja, transacción, total, total sin propina, referencia y URL de facturación. No confundas folio, ticket e ID de venta; no inventes cifras. Usa null para campos ausentes. Un QR ilegible no equivale a una URL visible.',
+    'Transcribe el ticket, incluida la línea de forma de pago si es visible, y extrae sólo campos visibles: empresa, marca, número de ticket, número de tienda, fecha/hora de venta, folio de venta, ID de venta, caja, transacción, total, total sin propina, referencia y URL de facturación. No confundas folio, ticket e ID de venta; no inventes cifras. Usa null para campos ausentes. Un QR ilegible no equivale a una URL visible.',
   );
 }
 

@@ -11,6 +11,7 @@ import { detectPortal, getPortalDefinition, type PortalDetection } from './porta
 import { discoverInvoicePortal, type DiscoveryResult } from './discovery/index.js';
 import { exploreInvoicePortal, type PortalExploration } from './automation/index.js';
 import { validatePortalUrl } from './validation.js';
+import { isRegimenCompatible, isRegimenFiscal, isUsoCfdiCompatible, usosCfdi } from './fiscalCatalogs.js';
 
 export interface PublicTicket {
   id: string; fileId: string; analysis: TicketAnalysis; detection: PortalDetection;
@@ -57,6 +58,16 @@ export function updateProfile(userId: string, values: {
     smtpFrom: values.smtp?.from ?? current.smtp_from,
     smtpPassEnc: values.smtp?.password === undefined ? current.smtp_pass_enc : values.smtp.password ? encryptText(values.smtp.password, getMasterKey(), `${userId}:smtp_password`) : null,
   };
+  if (values.rfc !== undefined || values.regimenFiscal !== undefined || values.usoCfdi !== undefined) {
+    if (next.regimenFiscal && !isRegimenFiscal(next.regimenFiscal)) throw new Error('Régimen fiscal fuera del catálogo vigente');
+    if (next.usoCfdi && !usosCfdi.some(item => item.codigo === next.usoCfdi)) throw new Error('Uso CFDI fuera del catálogo vigente');
+    if (next.rfc && next.regimenFiscal && !isRegimenCompatible(next.regimenFiscal, next.rfc)) {
+      throw new Error('El régimen fiscal no corresponde al tipo de persona del RFC');
+    }
+    if (next.usoCfdi && next.regimenFiscal && !isUsoCfdiCompatible(next.usoCfdi, next.regimenFiscal, next.rfc || undefined)) {
+      throw new Error('El uso CFDI no corresponde al régimen fiscal');
+    }
+  }
   db.prepare(`UPDATE profiles SET rfc=?,nombre=?,codigo_postal=?,regimen_fiscal=?,uso_cfdi=?,factura_email=?,domicilio=?,csf_file_id=?,openai_key_enc=?,smtp_host=?,smtp_port=?,smtp_secure=?,smtp_user=?,smtp_pass_enc=?,smtp_from=?,updated_at=CURRENT_TIMESTAMP WHERE user_id=?`)
     .run(next.rfc, next.nombre, next.codigoPostal, next.regimenFiscal, next.usoCfdi,
       next.facturaEmail, next.domicilio, next.csfFileId, next.openAiKeyEnc, next.smtpHost, next.smtpPort,
@@ -148,7 +159,10 @@ export async function saveCsf(userId: string, filename: string, data: Buffer): P
     removeFile(userId, file.id);
     throw new Error('La constancia corresponde a otro RFC. Actualiza el perfil fiscal antes de usarla.');
   }
-  const regimen = analysis.regimenFiscal?.match(/\b\d{3}\b/)?.[0] || '';
+  const detectedRegimen = analysis.regimenFiscal?.match(/\b\d{3}\b/)?.[0] || '';
+  const matchedRfc = current.rfc || analysis.rfc || '';
+  const regimen = detectedRegimen && isRegimenFiscal(detectedRegimen) &&
+    (!matchedRfc || isRegimenCompatible(detectedRegimen, matchedRfc)) ? detectedRegimen : '';
   db.prepare(`UPDATE profiles SET csf_file_id=?,rfc=?,nombre=?,codigo_postal=?,regimen_fiscal=?,updated_at=CURRENT_TIMESTAMP WHERE user_id=?`)
     .run(file.id, current.rfc || analysis.rfc || '', current.nombre || analysis.nombre || '',
       current.codigo_postal || analysis.codigoPostal || '', current.regimen_fiscal || regimen, userId);
