@@ -41,6 +41,15 @@ app.use(helmet({ contentSecurityPolicy: {
     frameSrc: ['https://www.google.com/recaptcha/', 'https://recaptcha.google.com/recaptcha/'],
     connectSrc: ["'self'", 'https://www.google.com/recaptcha/'], objectSrc: ["'none'"], frameAncestors: ["'none'"] },
 } }));
+// Keep fiscal data, browser captures and authentication responses out of HTTP caches.
+app.use('/api', (_req, res, next) => {
+  res.setHeader('Cache-Control', 'private, no-store');
+  next();
+});
+app.use('/mcp', (_req, res, next) => {
+  res.setHeader('Cache-Control', 'private, no-store');
+  next();
+});
 app.use(express.json({ limit: '10mb', strict: true }));
 
 // A generous per-connector ceiling plus a stricter per-email ceiling prevents
@@ -316,7 +325,15 @@ app.delete('/api/mcp-tokens/:id', requireSession, checkOrigin, requireCsrf, asyn
   res.json({ ok: true });
 });
 
-const mcpNode = toNodeHandler(mcpHandler, { maxRequestBodySize: 10 * 1024 * 1024 });
+const mcpNode = toNodeHandler({
+  async fetch(request, options) {
+    const response = await mcpHandler.fetch(request, options);
+    const headers = new Headers(response.headers);
+    // The MCP SDK sets its own cache header on streamed responses.
+    headers.set('Cache-Control', 'private, no-store, no-cache, no-transform');
+    return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+  },
+}, { maxRequestBodySize: 10 * 1024 * 1024 });
 app.all('/mcp', async (req, res, next) => {
   const origin = req.headers.origin;
   if (origin) {
@@ -334,6 +351,15 @@ app.all('/mcp', async (req, res, next) => {
   void mcpNode(req, res, req.body).catch(next);
 });
 
+app.get('/sw.js', (_req, res) => {
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.setHeader('Service-Worker-Allowed', '/');
+  res.type('application/javascript').sendFile(path.join(publicDir, 'sw.js'));
+});
+app.get('/manifest.webmanifest', (_req, res) => {
+  res.setHeader('Cache-Control', 'no-cache');
+  res.type('application/manifest+json').sendFile(path.join(publicDir, 'manifest.webmanifest'));
+});
 app.use(express.static(publicDir, { index: 'index.html', extensions: ['html'] }));
 app.use('/api', (_req, res) => res.status(404).json({ error: 'Ruta no encontrada' }));
 app.use((_req, res) => res.sendFile(path.join(publicDir, 'index.html')));

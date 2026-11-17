@@ -39,7 +39,18 @@ test('API separates users, protects writes, and serves authenticated MCP', { tim
       await new Promise(resolve => setTimeout(resolve, 100));
     }
     assert.equal(ready, true, 'server started');
-    const publicConfig = await fetch(`${base}/api/config`).then(response => response.json()) as Record<string, unknown>;
+    const serviceWorker = await fetch(`${base}/sw.js`);
+    assert.equal(serviceWorker.status, 200);
+    assert.match(serviceWorker.headers.get('content-type') || '', /javascript/);
+    assert.match(serviceWorker.headers.get('cache-control') || '', /no-store/);
+    assert.equal(serviceWorker.headers.get('service-worker-allowed'), '/');
+    const manifest = await fetch(`${base}/manifest.webmanifest`);
+    assert.equal(manifest.status, 200);
+    assert.match(manifest.headers.get('content-type') || '', /application\/manifest\+json/);
+    assert.equal((await manifest.json() as { display: string }).display, 'standalone');
+    const configResponse = await fetch(`${base}/api/config`);
+    assert.match(configResponse.headers.get('cache-control') || '', /no-store/);
+    const publicConfig = await configResponse.json() as Record<string, unknown>;
     assert.deepEqual(publicConfig, { recaptchaSiteKey: null, registrationEnabled: true });
 
     async function register(email: string) {
@@ -69,6 +80,7 @@ test('API separates users, protects writes, and serves authenticated MCP', { tim
     assert.match(JSON.stringify(await portals.json()), /oxxo/);
     const ticketDetail = await fetch(`${base}/api/tickets/${ticket.id}`, { headers: { cookie: alice.cookie } });
     assert.equal(ticketDetail.status, 200);
+    assert.match(ticketDetail.headers.get('cache-control') || '', /no-store/);
     assert.match(JSON.stringify(await ticketDetail.json()), /detection/);
     assert.equal((await fetch(`${base}/api/tickets/${ticket.id}`, { headers: { cookie: bob.cookie } })).status, 404);
     assert.equal((await fetch(`${base}/api/tickets`, { headers: { cookie: bob.cookie } }).then(r => r.json()) as unknown[]).length, 0);
@@ -99,6 +111,7 @@ test('API separates users, protects writes, and serves authenticated MCP', { tim
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }) });
     const mcp = await listMcp(token);
     assert.equal(mcp.status, 200);
+    assert.match(mcp.headers.get('cache-control') || '', /no-store/);
     const output = await mcp.text();
     assert.match(output, /cargar_y_facturar/);
     assert.match(output, /iniciar_factura/);

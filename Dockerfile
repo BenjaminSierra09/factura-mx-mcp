@@ -12,7 +12,6 @@ COPY package.json package-lock.json ./
 RUN npm ci --include=dev
 COPY tsconfig.json ./
 COPY src ./src
-COPY scripts ./scripts
 COPY public ./public
 RUN npm run build \
     && npm prune --omit=dev \

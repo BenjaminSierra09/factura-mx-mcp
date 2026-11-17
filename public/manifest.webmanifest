@@ -1,0 +1,20 @@
+{
+  "id": "/",
+  "name": "Factura Clara",
+  "short_name": "Factura Clara",
+  "description": "Toma una foto de tu ticket, solicita tu CFDI y sigue el trámite desde tu teléfono.",
+  "lang": "es-MX",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f7f7f5",
+  "theme_color": "#f7f7f5",
+  "icons": [
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ],
+  "shortcuts": [
+    { "name": "Tomar foto de un ticket", "short_name": "Nuevo ticket", "url": "/?panel=new-ticket" },
+    { "name": "Ver mis facturas", "short_name": "Facturas", "url": "/?panel=jobs" }
+  ]
+}

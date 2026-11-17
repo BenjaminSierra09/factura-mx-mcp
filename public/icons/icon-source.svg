@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Factura Clara">
+  <rect width="512" height="512" fill="#f7f7f5"/>
+  <rect x="91" y="91" width="330" height="330" rx="75" fill="#242424"/>
+  <path d="M197 172h143v39H241v44h84v38h-84v79h-44z" fill="#fff"/>
+</svg>

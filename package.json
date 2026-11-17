@@ -7,13 +7,12 @@
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "build": "tsc -p tsconfig.json",
-    "migrate:sqlite": "node --experimental-sqlite scripts/migrate-sqlite-to-mariadb.mjs",
     "start": "node dist/src/server.js",
     "test": "npm run build && node --test --import tsx tests/*.test.ts tests/*/*.test.ts",
     "check": "tsc --noEmit -p tsconfig.json"
   },
   "engines": {
-    "node": ">=22.16"
+    "node": ">=22.13"
   },
   "dependencies": {
     "@modelcontextprotocol/node": "^2.1.2",

@@ -9,12 +9,14 @@
     fiscalCatalogs: null,
     tickets: [],
     jobs: [],
+    jobsLoaded: false,
     tokens: [],
     selectedTicketId: '',
     selectedJobId: '',
     selectedJobStatus: '',
     selectedJob: null,
-    panel: 'overview',
+    panel: ['overview', 'new-ticket', 'jobs', 'profile', 'mcp'].includes(new URLSearchParams(location.search).get('panel'))
+      ? new URLSearchParams(location.search).get('panel') : 'overview',
     registerMode: false,
     registrationEnabled: true,
     recaptchaSiteKey: null,
@@ -36,6 +38,11 @@
     explorationAttempted: new Set(),
     discoveryAttempted: new Set(),
     discovering: new Set(),
+    selectedTicketFile: null,
+    ticketPreviewUrl: null,
+    installPrompt: null,
+    serviceWorkerRegistration: null,
+    reloadingForUpdate: false,
   };
 
   const $ = (selector, root = document) => root.querySelector(selector);
@@ -62,7 +69,13 @@
       headers['Content-Type'] = 'application/json';
       options.body = JSON.stringify(options.body);
     }
-    const response = await fetch(path, { ...options, headers, credentials: 'same-origin' });
+    let response;
+    try { response = await fetch(path, { ...options, headers, credentials: 'same-origin' }); }
+    catch {
+      throw new Error(navigator.onLine === false
+        ? 'Sin conexión. Recupera internet antes de continuar.'
+        : 'No se pudo conectar con el servidor. Revisa tu conexión e inténtalo de nuevo.');
+    }
     const contentType = response.headers.get('content-type') || '';
     const data = contentType.includes('application/json') ? await response.json() : await response.text();
     if (!response.ok) {
@@ -80,6 +93,87 @@
     toast.hidden = false;
     clearTimeout(state.toastTimer);
     state.toastTimer = setTimeout(() => { toast.hidden = true; }, 5300);
+  }
+
+  function isStandalone() {
+    return window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
+  }
+
+  function updateConnectionStatus() {
+    $('#connection-banner').hidden = navigator.onLine !== false;
+  }
+
+  function showInstallHelp() {
+    const hint = $('#pwa-install-help');
+    const isIos = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+      (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    hint.textContent = isIos
+      ? 'En Safari, toca Compartir y luego «Agregar a pantalla de inicio». Después abre Factura Clara desde su icono.'
+      : 'Abre el menú de tu navegador y elige «Instalar aplicación» o «Agregar a pantalla de inicio». También puedes seguir usándola en esta pestaña.';
+    hint.hidden = false;
+  }
+
+  async function installApp() {
+    if (!state.installPrompt) { showInstallHelp(); return; }
+    const prompt = state.installPrompt;
+    state.installPrompt = null;
+    try {
+      await prompt.prompt();
+      const choice = await prompt.userChoice;
+      if (choice?.outcome === 'accepted') $('#pwa-install-card').hidden = true;
+      else showInstallHelp();
+    } catch { showInstallHelp(); }
+  }
+
+  function showPwaUpdate(registration) {
+    if (!registration.waiting || !navigator.serviceWorker.controller) return;
+    state.serviceWorkerRegistration = registration;
+    $('#update-banner').hidden = false;
+  }
+
+  async function registerPwa() {
+    updateConnectionStatus();
+    if (isStandalone()) $('#pwa-install-card').hidden = true;
+    window.addEventListener('online', () => {
+      updateConnectionStatus();
+      if (state.me) void refreshJobsOnResume();
+    });
+    window.addEventListener('offline', updateConnectionStatus);
+    window.addEventListener('beforeinstallprompt', event => {
+      event.preventDefault();
+      state.installPrompt = event;
+      $('#pwa-install-help').hidden = true;
+    });
+    window.addEventListener('appinstalled', () => {
+      state.installPrompt = null;
+      $('#pwa-install-card').hidden = true;
+    });
+    if (!('serviceWorker' in navigator) || !window.isSecureContext) return;
+    try {
+      const registration = await navigator.serviceWorker.register('/sw.js', { scope: '/' });
+      state.serviceWorkerRegistration = registration;
+      showPwaUpdate(registration);
+      registration.addEventListener('updatefound', () => {
+        const worker = registration.installing;
+        worker?.addEventListener('statechange', () => {
+          if (worker.state === 'installed') showPwaUpdate(registration);
+        });
+      });
+      navigator.serviceWorker.addEventListener('controllerchange', () => {
+        if (state.reloadingForUpdate) location.reload();
+      });
+    } catch {
+      // The web app remains usable when the browser does not allow installation.
+    }
+  }
+
+  async function refreshJobsOnResume() {
+    if (!state.me || document.hidden || navigator.onLine === false) return;
+    await loadJobs();
+    if (state.panel === 'jobs' && state.selectedJobId &&
+        !document.activeElement?.closest?.('#challenge-section')) {
+      await loadJobDetail(state.selectedJobId);
+    }
   }
 
   async function withPending(button, work) {
@@ -104,6 +198,7 @@
     $('#account-email').textContent = state.me.email;
     $('.account-avatar').textContent = state.me.email.slice(0, 1).toUpperCase();
     $('#mcp-endpoint').textContent = `${location.origin}/mcp`;
+    renderMcpGuide();
     showPanel(state.panel);
   }
 
@@ -237,6 +332,7 @@
       state.profile = profile.profile || profile;
       state.tickets = tickets.tickets || tickets;
       state.jobs = jobs.jobs || jobs;
+      state.jobsLoaded = true;
       state.portals = Array.isArray(portals) ? portals : portals.portals || [];
       state.fiscalCatalogs = fiscalCatalogs;
       renderProviderOptions();
@@ -719,14 +815,61 @@
     }
   }
 
+  function selectTicketFile(file) {
+    state.selectedTicketFile = file || null;
+    if (state.ticketPreviewUrl) URL.revokeObjectURL(state.ticketPreviewUrl);
+    state.ticketPreviewUrl = null;
+    const preview = $('#ticket-preview');
+    preview.hidden = true;
+    preview.removeAttribute('src');
+    $('#ticket-file-name').textContent = file
+      ? `${file.name || 'Foto del ticket'} · ${(file.size / 1024 / 1024).toFixed(1)} MB` : '';
+    if (file?.type.startsWith('image/')) {
+      state.ticketPreviewUrl = URL.createObjectURL(file);
+      preview.src = state.ticketPreviewUrl;
+      preview.hidden = false;
+    }
+  }
+
+  async function prepareTicketFile(file) {
+    const accepted = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
+    if (accepted.includes(file.type) && file.size <= 15 * 1024 * 1024) return file;
+    if (!file.type && /\.pdf$/i.test(file.name) && file.size <= 15 * 1024 * 1024) return file;
+    if (!file.type.startsWith('image/') && !/\.(?:heic|heif|jpe?g|png|webp)$/i.test(file.name)) {
+      throw new Error('Usa una foto JPEG, PNG o WebP, o un PDF de hasta 15 MB.');
+    }
+    const url = URL.createObjectURL(file);
+    try {
+      const image = await new Promise((resolve, reject) => {
+        const element = new Image();
+        element.onload = () => resolve(element);
+        element.onerror = () => reject(new Error('No se pudo leer esta foto. Si tu teléfono usa HEIC, prueba tomarla en formato JPEG.'));
+        element.src = url;
+      });
+      const scale = Math.min(1, 2400 / Math.max(image.naturalWidth, image.naturalHeight));
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+      canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+      const context = canvas.getContext('2d');
+      if (!context) throw new Error('No se pudo preparar esta foto en el dispositivo.');
+      context.drawImage(image, 0, 0, canvas.width, canvas.height);
+      const jpeg = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.88));
+      if (!jpeg || jpeg.size > 15 * 1024 * 1024) throw new Error('La foto supera 15 MB. Toma otra con menor resolución.');
+      const filename = (file.name || 'ticket').replace(/\.[^.]+$/, '') + '.jpg';
+      return new File([jpeg], filename, { type: 'image/jpeg' });
+    } finally { URL.revokeObjectURL(url); }
+  }
+
   async function uploadTicket(event) {
     event.preventDefault();
-    const file = $('#ticket-file').files[0];
+    const file = state.selectedTicketFile;
     if (!file) { notify('Elige un ticket.', 'error'); return; }
+    if (navigator.onLine === false) { notify('Necesitas conexión para enviar el ticket.', 'error'); return; }
     const paymentHint = $('#ticket-payment-note').value.trim();
-    const data = new FormData(); data.append('file', file);
     try {
       await withPending($('#ticket-upload-button'), async () => {
+        const prepared = await prepareTicketFile(file);
+        const data = new FormData(); data.append('file', prepared, prepared.name);
         const response = await api('/api/tickets', { method: 'POST', body: data });
         const ticket = response.ticket || response;
         state.tickets.unshift(ticket);
@@ -735,7 +878,8 @@
         renderTickets();
         renderOverview();
         $('#ticket-file').value = '';
-        $('#ticket-file-name').textContent = '';
+        $('#ticket-camera').value = '';
+        selectTicketFile(null);
         $('#ticket-payment-note').value = '';
         if (response.warning) notify(response.warning, 'error');
         $('#ticket-analysis-card').scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -938,10 +1082,16 @@
   async function loadJobs() {
     if (!state.me) return;
     try {
+      const previous = new Map(state.jobs.map(job => [job.id, job.status]));
       const response = await api('/api/jobs');
       state.jobs = response.jobs || response;
       renderJobs();
       renderOverview();
+      if (state.jobsLoaded && state.jobs.some(job => job.status === 'needs_action' &&
+          previous.has(job.id) && previous.get(job.id) !== 'needs_action')) {
+        notify('Un trámite necesita tu ayuda. Abre “Mis facturas” para continuar.');
+      }
+      state.jobsLoaded = true;
     } catch (error) { notify(error.message, 'error'); }
   }
 
@@ -975,7 +1125,7 @@
     const filesHtml = documents.length ? `<div class="detail-section"><h3>Archivos recibidos</h3>${documents.map(doc => `<a class="document-link" href="/api/files/${encodeURIComponent(doc.fileId)}" download><span>${escapeHtml(doc.filename || `Factura ${doc.kind || ''}`)}</span><span class="download-icon" aria-hidden="true">↓</span></a>`).join('')}</div>` : '';
     const eventsHtml = events.length ? `<div class="detail-section"><h3>Actividad</h3><ol class="event-list">${events.map(event => `<li><div><span>${escapeHtml(event.message)}</span><time>${escapeHtml(friendlyDate(event.createdAt || event.created_at))}</time></div></li>`).join('')}</ol></div>` : '';
     const recoveryHtml = primeraPlus && ['submitted', 'failed'].includes(job.status) ? `<div class="detail-section recovery-section"><h3>¿Ya se generó la factura?</h3><p>Busca el CFDI existente con un token del boleto y tu RFC. Esta operación no crea otra factura.</p><div class="challenge-tools"><input class="recovery-token" type="text" aria-label="Token para recuperar CFDI" placeholder="Token del boleto"><button type="button" class="button button-secondary" data-challenge="recover">Buscar CFDI</button></div></div>` : '';
-    const challengeHtml = job.status === 'needs_action' ? `<div class="detail-section" id="challenge-section"><h3>Acción en el portal</h3><p class="challenge-copy">Si el portal pide un CAPTCHA o una confirmación, interactúa con la captura y pulsa “Continuar” al terminar. El navegador debe seguir activo para usar estos controles.</p><div class="challenge-screen"><img id="challenge-image" alt="Captura actual del portal para resolver la acción pendiente" src="/api/jobs/${encodeURIComponent(job.id)}/screenshot?t=${Date.now()}"><div id="challenge-image-fallback" class="loading-screen" hidden>No hay una sesión de navegador activa. Revisa el portal antes de volver a enviar.</div></div><div class="challenge-tools"><input id="challenge-text" type="text" aria-label="Texto para escribir en el portal" placeholder="Texto para escribir"><button type="button" class="button button-secondary" data-challenge="type">Escribir</button></div><div class="challenge-tools"><select id="challenge-key" aria-label="Tecla para enviar"><option>Tab</option><option>Enter</option><option>Escape</option><option>Backspace</option><option>ArrowDown</option><option>ArrowUp</option></select><button type="button" class="button button-secondary" data-challenge="press">Enviar tecla</button><button type="button" class="button button-secondary" data-challenge="refresh">Actualizar captura</button></div><div class="challenge-tools"><button type="button" class="button button-primary" data-challenge="continue">Continuar trámite</button><button type="button" class="button button-danger" data-challenge="cancel">Cancelar</button></div></div>` : '';
+    const challengeHtml = job.status === 'needs_action' ? `<div class="detail-section" id="challenge-section"><h3>Acción en el portal</h3><p class="challenge-copy">Si el portal pide un CAPTCHA o un dato adicional, toca la captura o escribe la respuesta. Puedes ampliar la imagen para seleccionar con más precisión. Pulsa “Continuar” al terminar.</p><div class="challenge-screen"><img id="challenge-image" alt="Captura actual del portal para resolver la acción pendiente" src="/api/jobs/${encodeURIComponent(job.id)}/screenshot?t=${Date.now()}"><div id="challenge-image-fallback" class="loading-screen" hidden>No hay una sesión de navegador activa. Revisa el portal antes de volver a enviar.</div></div><div class="challenge-tools"><input id="challenge-text" type="text" aria-label="Texto para escribir en el portal" placeholder="Texto para escribir"><button type="button" class="button button-secondary" data-challenge="type">Escribir</button></div><div class="challenge-tools"><select id="challenge-key" aria-label="Tecla para enviar"><option>Tab</option><option>Enter</option><option>Escape</option><option>Backspace</option><option>ArrowDown</option><option>ArrowUp</option></select><button type="button" class="button button-secondary" data-challenge="press">Enviar tecla</button><button type="button" class="button button-secondary" data-challenge="refresh">Actualizar captura</button><button type="button" class="button button-secondary" data-challenge="zoom">Ampliar captura</button></div><div class="challenge-tools"><button type="button" class="button button-primary" data-challenge="continue">Continuar trámite</button><button type="button" class="button button-danger" data-challenge="cancel">Cancelar</button></div></div>` : '';
     $('#job-detail').innerHTML = `<div class="detail-top"><div><p class="eyebrow">DETALLE DEL TRÁMITE</p><h2>${escapeHtml(jobTitle(job))}</h2><div class="detail-id">${escapeHtml(job.id)} · ${escapeHtml(friendlyDate(job.createdAt))}</div></div><span class="pill pill-${escapeHtml(job.status)}">${escapeHtml(statusText[job.status] || job.status)}</span></div><div class="detail-summary ${job.status === 'failed' ? 'error' : ''}">${escapeHtml(message)}</div>${filesHtml}${challengeHtml}${recoveryHtml}${eventsHtml}`;
     const humanReason = events.filter(event => event.kind === 'human_action').at(-1)?.message;
     const challengeCopy = $('#challenge-section .challenge-copy');
@@ -1095,6 +1245,25 @@
     $('#mcp-token-list').innerHTML = state.tokens.length ? state.tokens.map(token => `<div class="token-item"><div><strong>${escapeHtml(token.name)}</strong><small>Creada ${escapeHtml(friendlyDate(token.createdAt))}${token.lastUsedAt ? ` · Usada ${escapeHtml(friendlyDate(token.lastUsedAt))}` : ''}</small></div><button type="button" class="text-button" data-revoke-token="${escapeHtml(token.id)}">Revocar</button></div>`).join('') : '<p class="empty-inline">Todavía no has creado claves MCP.</p>';
   }
 
+  function renderMcpGuide() {
+    const endpoint = $('#mcp-endpoint').textContent;
+    $('#mcp-code-claude').textContent = `claude mcp add --transport http factura-clara --scope user ${endpoint} --header "Authorization: Bearer TU_CLAVE_MCP"\nclaude mcp list`;
+    $('#mcp-code-codex').textContent = `[mcp_servers.factura_clara]\nurl = "${endpoint}"\nbearer_token_env_var = "FACTURA_MCP_TOKEN"`;
+    $('#mcp-code-http').textContent = `Transporte: Streamable HTTP\nURL: ${endpoint}\nAuthorization: Bearer TU_CLAVE_MCP`;
+  }
+
+  function selectMcpGuide(name, focus = false) {
+    const tab = $(`[data-mcp-tab="${name}"]`);
+    if (!tab) return;
+    $$('[data-mcp-tab]').forEach(button => {
+      const selected = button === tab;
+      button.setAttribute('aria-selected', String(selected));
+      button.tabIndex = selected ? 0 : -1;
+      $(`#mcp-guide-${button.dataset.mcpTab}`).hidden = !selected;
+    });
+    if (focus) tab.focus();
+  }
+
   async function createToken(event) {
     event.preventDefault();
     const name = $('#mcp-name').value.trim();
@@ -1129,6 +1298,7 @@
     try { await api('/api/auth/logout', { method: 'POST' }); }
     catch (error) { notify(error.message, 'error'); }
     state.me = null; state.csrfToken = ''; state.profile = null; state.tickets = []; state.jobs = [];
+    state.jobsLoaded = false;
     state.fieldEdits.clear(); state.paymentSuggestions.clear(); state.paymentHints.clear(); state.paymentEdits.clear();
     state.pendingAutoTicketId = ''; state.autoReviewReason = '';
     showAuth();
@@ -1156,8 +1326,25 @@
     $('#api-form').addEventListener('submit', saveApiKey);
     $('#smtp-form').addEventListener('submit', saveSmtp);
     $('#csf-file').addEventListener('change', event => { $('#csf-file-name').textContent = event.target.files[0]?.name || ''; });
-    $('#ticket-file').addEventListener('change', event => { $('#ticket-file-name').textContent = event.target.files[0]?.name || ''; });
+    $('#ticket-file').addEventListener('change', event => {
+      if (event.target.files[0]) $('#ticket-camera').value = '';
+      selectTicketFile(event.target.files[0]);
+    });
+    $('#ticket-camera').addEventListener('change', event => {
+      if (event.target.files[0]) $('#ticket-file').value = '';
+      selectTicketFile(event.target.files[0]);
+    });
+    $('#ticket-preview').addEventListener('error', event => { event.target.hidden = true; });
     $('#ticket-upload-form').addEventListener('submit', uploadTicket);
+    $('#install-app').addEventListener('click', () => void installApp());
+    $('#update-app').addEventListener('click', () => {
+      const waiting = state.serviceWorkerRegistration?.waiting;
+      if (!waiting) return;
+      state.reloadingForUpdate = true;
+      waiting.postMessage({ type: 'SKIP_WAITING' });
+    });
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) void refreshJobsOnResume(); });
+    window.addEventListener('focus', () => void refreshJobsOnResume());
     $('#invoice-review-retry').addEventListener('click', () => {
       if (state.autoReviewReason === 'payment' && !$('#job-forma-pago').value) {
         notify('Selecciona la forma de pago antes de reintentar.', 'error');
@@ -1231,6 +1418,11 @@
       const button = event.target.closest('[data-challenge]');
       if (!button) return;
       if (button.dataset.challenge === 'refresh') refreshChallengeImage();
+      else if (button.dataset.challenge === 'zoom') {
+        const screen = $('.challenge-screen', $('#job-detail'));
+        screen?.classList.toggle('zoomed');
+        button.textContent = screen?.classList.contains('zoomed') ? 'Vista normal' : 'Ampliar captura';
+      }
       else if (button.dataset.challenge === 'retry') void retryJob(button);
       else if (button.dataset.challenge === 'review-ticket') reviewTicketForRetry();
       else if (button.dataset.challenge === 'recover') void recoverJob(button);
@@ -1240,15 +1432,37 @@
     $('#mcp-token-list').addEventListener('click', event => { const button = event.target.closest('[data-revoke-token]'); if (button) void revokeToken(button.dataset.revokeToken); });
     $('#copy-mcp-token').addEventListener('click', () => void copy($('#mcp-token-value').textContent));
     $('#copy-mcp-endpoint').addEventListener('click', () => void copy($('#mcp-endpoint').textContent));
+    $('.mcp-tabs').addEventListener('click', event => {
+      const tab = event.target.closest('[data-mcp-tab]');
+      if (tab) selectMcpGuide(tab.dataset.mcpTab);
+    });
+    $('.mcp-tabs').addEventListener('keydown', event => {
+      if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+      const tabs = $$('[data-mcp-tab]');
+      const index = tabs.indexOf(document.activeElement);
+      if (index < 0) return;
+      event.preventDefault();
+      const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1
+        : (index + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+      selectMcpGuide(tabs[next].dataset.mcpTab, true);
+    });
+    $$('[data-copy-mcp-guide]').forEach(button => button.addEventListener('click', () => {
+      void copy($(`#mcp-code-${button.dataset.copyMcpGuide}`).textContent);
+    }));
   }
 
   bindEvents();
+  void registerPwa();
   setAuthMode(false);
   void loadAuthConfiguration();
   void initializeSession();
   setInterval(async () => {
     if (!state.me || document.hidden) return;
     await loadJobs();
-    if (state.panel === 'jobs' && state.selectedJobId && state.selectedJobStatus !== 'needs_action') await loadJobDetail(state.selectedJobId);
+    const selected = state.jobs.find(job => job.id === state.selectedJobId);
+    if (state.panel === 'jobs' && state.selectedJobId &&
+        (state.selectedJobStatus !== 'needs_action' || selected?.status !== 'needs_action')) {
+      await loadJobDetail(state.selectedJobId);
+    }
   }, 6500);
 })();

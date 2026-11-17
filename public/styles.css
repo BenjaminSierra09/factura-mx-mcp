@@ -1823,6 +1823,107 @@ a {
   margin: 12px 0;
 }
 
+.mcp-guide {
+  max-width: 920px;
+}
+
+.mcp-guide .card-heading,
+.mcp-guide-last .card-heading {
+  margin-bottom: 16px;
+}
+
+.mcp-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 20px;
+  border-bottom: 1px solid var(--line);
+  margin: 22px 0 23px;
+}
+
+.mcp-tab {
+  appearance: none;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: #757570;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 10px 2px 12px;
+  margin-bottom: -1px;
+}
+
+.mcp-tab:hover {
+  color: var(--ink);
+}
+
+.mcp-tab[aria-selected="true"] {
+  border-bottom-color: #30302e;
+  color: var(--ink);
+}
+
+.mcp-guide-panel {
+  max-width: 790px;
+  color: #4c4c49;
+}
+
+.mcp-guide-panel h3 {
+  color: var(--ink);
+  margin: 0 0 8px;
+  font-size: 16px;
+}
+
+.mcp-guide-panel p,
+.mcp-guide-last p {
+  margin: 0 0 12px;
+  line-height: 1.6;
+}
+
+.mcp-guide-steps {
+  margin: 0 0 20px;
+  padding-left: 22px;
+}
+
+.mcp-guide-steps li {
+  padding-left: 4px;
+  margin-bottom: 8px;
+}
+
+.mcp-guide-steps code {
+  font-size: 12px;
+}
+
+.mcp-code-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+  color: #777773;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.mcp-code {
+  background: #f7f7f5;
+  border: 1px solid #e6e6e3;
+  border-radius: 8px;
+  padding: 16px;
+  margin: 0 0 15px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.mcp-guide-footnote {
+  color: #777773;
+  font-size: 12px;
+}
+
+.mcp-guide-last {
+  max-width: 920px;
+}
+
 .auth-form-card input::placeholder {
   color: #a2a29d;
 }
@@ -2151,4 +2252,150 @@ a {
     min-height: 70px;
   }
 
+}
+
+.connection-banner {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  padding: 10px 18px;
+  background: #fff5df;
+  border-bottom: 1px solid #e8d2aa;
+  color: #5b481f;
+  text-align: center;
+  font-size: 13px;
+}
+
+.update-banner {
+  position: fixed;
+  z-index: 60;
+  left: 50%;
+  bottom: max(16px, env(safe-area-inset-bottom));
+  width: min(calc(100% - 32px), 440px);
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 15px;
+  padding: 13px 15px;
+  border: 1px solid #dcdcd9;
+  border-radius: 9px;
+  background: #fff;
+  box-shadow: 0 8px 30px #0002;
+  font-size: 13px;
+}
+
+.update-banner button {
+  border: 0;
+  border-radius: 6px;
+  padding: 9px 11px;
+  background: #313130;
+  color: #fff;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.pwa-install-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 22px;
+}
+
+.pwa-install-card p:not(.eyebrow) {
+  margin: 9px 0 0;
+  max-width: 65ch;
+  color: #696969;
+}
+
+.pwa-install-card #pwa-install-help {
+  color: #454542;
+}
+
+.pwa-install-card .button {
+  flex: none;
+}
+
+.ticket-source-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 15px;
+}
+
+.ticket-source-actions .camera-button {
+  position: relative;
+  min-height: 48px;
+  cursor: pointer;
+}
+
+.ticket-source-actions .camera-button:focus-within {
+  outline: 2px solid #797976;
+  outline-offset: 3px;
+}
+
+.visually-hidden-file {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+
+.ticket-preview {
+  width: min(100%, 420px);
+  max-height: 340px;
+  object-fit: contain;
+  border: 1px solid #e8e8e6;
+  border-radius: 8px;
+  background: #fafaf9;
+}
+
+.challenge-screen.zoomed {
+  max-height: 70vh;
+  overflow: auto;
+}
+
+.challenge-screen.zoomed img {
+  width: min(900px, 240vw);
+  max-width: none;
+}
+
+.offline-layout {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: #f7f7f5;
+}
+
+.offline-card {
+  width: min(100%, 430px);
+  padding: 30px;
+  border: 1px solid #e9e9e7;
+  border-radius: 14px;
+  background: #fff;
+}
+
+.offline-card h1 {
+  margin: 36px 0 10px;
+  font-size: clamp(27px, 7vw, 38px);
+  letter-spacing: -.04em;
+}
+
+.offline-card p {
+  margin: 0 0 24px;
+  color: #666;
+  line-height: 1.6;
+}
+
+@media(max-width:600px) {
+  .pwa-install-card { align-items: stretch; flex-direction: column; }
+  .pwa-install-card .button { align-self: flex-start; white-space: normal; }
+  .ticket-source-actions { align-items: flex-start; flex-direction: column; }
+  .update-banner { align-items: stretch; flex-direction: column; }
+  .mcp-tabs { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 0 12px; border-bottom: 0; }
+  .mcp-tab { text-align: left; border-bottom: 1px solid var(--line); margin-bottom: 0; }
+  .mcp-tab[aria-selected="true"] { border-bottom: 2px solid #30302e; }
 }
