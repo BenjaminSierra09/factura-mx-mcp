@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
 import sharp from 'sharp';
-import Database from 'better-sqlite3';
+import { createTestDatabase } from './support/mariadb.js';
 
 async function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -20,13 +20,14 @@ async function freePort(): Promise<number> {
   });
 }
 
-test('auto-invoice starts only with an owned ticket and returns the specific missing step', { timeout: 20_000 }, async () => {
+test('auto-invoice starts only with an owned ticket and returns the specific missing step', { timeout: 35_000 }, async () => {
   const dataDir = await mkdtemp(path.join(os.tmpdir(), 'factura-auto-api-'));
+  const testDb = await createTestDatabase();
   const port = await freePort();
   const base = `http://127.0.0.1:${port}`;
   const child = spawn(process.execPath, ['--import', 'tsx', 'src/server.ts'], {
     cwd: process.cwd(), stdio: 'pipe',
-    env: { ...process.env, DATA_DIR: dataDir, PORT: String(port), HOST: '127.0.0.1',
+    env: { ...process.env, ...testDb.env, DATA_DIR: dataDir, PORT: String(port), HOST: '127.0.0.1',
       APP_PUBLIC_ORIGIN: '', APP_ALLOWED_HOSTS: 'localhost,127.0.0.1',
       RECAPTCHA_SITE_KEY: '', RECAPTCHA_SECRET_KEY: '', RECAPTCHA_SECRET_KEY_FILE: '' },
   });
@@ -99,15 +100,13 @@ test('auto-invoice starts only with an owned ticket and returns the specific mis
       .then(response => response.json()) as { analysis: { formaPagoUsuario?: { codigo: string; confirmada?: boolean } } };
     assert.equal(stillConfirmed.analysis.formaPagoUsuario?.codigo, '28', 'a later note does not replace a confirmed form');
     assert.equal(stillConfirmed.analysis.formaPagoUsuario?.confirmada, true);
-    const sqlite = new Database(path.join(dataDir, 'app.sqlite'));
-    try {
-      const row = sqlite.prepare('SELECT analysis_json FROM tickets WHERE id=?').get(ticket.id) as { analysis_json: string };
-      const analysis = JSON.parse(row.analysis_json) as Record<string, unknown>;
-      analysis.empresa = 'Primera Plus';
-      analysis.formaPagoSugerida = { codigo: '04', evidencia: 'Ticket: Tarjeta de crédito', confianza: 'alta' };
-      analysis.formaPagoUsuario = null;
-      sqlite.prepare('UPDATE tickets SET analysis_json=? WHERE id=?').run(JSON.stringify(analysis), ticket.id);
-    } finally { sqlite.close(); }
+    const [row] = await testDb.query<{ analysis_json: string }>('SELECT analysis_json FROM tickets WHERE id=?', [ticket.id]);
+    assert.ok(row);
+    const analysis = JSON.parse(row.analysis_json) as Record<string, unknown>;
+    analysis.empresa = 'Primera Plus';
+    analysis.formaPagoSugerida = { codigo: '04', evidencia: 'Ticket: Tarjeta de crédito', confianza: 'alta' };
+    analysis.formaPagoUsuario = null;
+    await testDb.query('UPDATE tickets SET analysis_json=? WHERE id=?', [JSON.stringify(analysis), ticket.id]);
     const paymentConflict = await post(owner.cookie, owner.csrfToken)
       .then(response => response.json()) as { status: string; reason: string };
     assert.equal(paymentConflict.status, 'needs_review');
@@ -122,6 +121,7 @@ test('auto-invoice starts only with an owned ticket and returns the specific mis
       child.kill('SIGTERM');
       await new Promise(resolve => child.once('exit', resolve));
     }
+    await testDb.close();
     await rm(dataDir, { recursive: true, force: true });
   }
 });

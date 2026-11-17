@@ -7,7 +7,7 @@ import path from 'node:path';
 import { toNodeHandler } from '@modelcontextprotocol/node';
 import * as z from 'zod/v4';
 import { config } from './config.js';
-import { db, getProfile } from './db.js';
+import { execute, getProfile, initializeDatabase, queryAll, queryOne } from './db.js';
 import { createUser, authenticate, createSession, setSessionCookie, clearSessionCookie, requireSession, requireCsrf, checkOrigin, deleteSession, createMcpToken, getMcpUser } from './auth.js';
 import { createTicket, deleteCsf, discoverTicket, exploreTicket, getTicket, listTickets, publicProfile, saveCsf, updateProfile } from './service.js';
 import { listPortals } from './portals/index.js';
@@ -115,7 +115,14 @@ function limitIntensiveConcurrency(_req: Request, res: Response, next: NextFunct
   next();
 }
 
-app.get('/healthz', (_req, res) => res.json({ ok: true }));
+app.get('/healthz', async (_req, res) => {
+  try {
+    await queryOne('SELECT 1 AS ok');
+    res.json({ ok: true });
+  } catch {
+    res.status(503).json({ ok: false });
+  }
+});
 app.get('/api/config', (_req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   res.json({ recaptchaSiteKey, registrationEnabled: process.env.ALLOW_REGISTRATION !== 'false' });
@@ -145,7 +152,7 @@ app.post('/api/auth/register', checkOrigin, authGlobalLimit, authEmailLimit, asy
   const input = z.object({ email: z.email(), password: z.string().min(12).max(256), recaptchaToken: z.string().max(4096).optional() }).parse(req.body);
   if (!(await requireAuthRecaptcha(input.recaptchaToken, req, res))) return;
   const user = await createUser(input.email, input.password);
-  const session = createSession(user.id);
+  const session = await createSession(user.id);
   setSessionCookie(res, session.token);
   res.status(201).json({ id: user.id, email: user.email, csrfToken: session.csrfToken });
 });
@@ -155,7 +162,7 @@ app.post('/api/auth/login', checkOrigin, authGlobalLimit, authEmailLimit, async 
   if (!(await requireAuthRecaptcha(input.recaptchaToken, req, res))) return;
   const user = await authenticate(input.email, input.password);
   if (!user) { res.status(401).json({ error: 'Correo o contraseña incorrectos' }); return; }
-  const session = createSession(user.id);
+  const session = await createSession(user.id);
   setSessionCookie(res, session.token);
   res.json({ id: user.id, email: user.email, csrfToken: session.csrfToken });
 });
@@ -164,13 +171,13 @@ app.get('/api/me', requireSession, (_req, res) => {
   res.json({ id: res.locals.userId, email: res.locals.email, csrfToken: res.locals.csrfToken });
 });
 
-app.post('/api/auth/logout', requireSession, checkOrigin, requireCsrf, (_req, res) => {
-  deleteSession(res.locals.sessionToken);
+app.post('/api/auth/logout', requireSession, checkOrigin, requireCsrf, async (_req, res) => {
+  await deleteSession(res.locals.sessionToken);
   clearSessionCookie(res);
   res.json({ ok: true });
 });
 
-app.get('/api/profile', requireSession, (_req, res) => res.json(publicProfile(getProfile(res.locals.userId))));
+app.get('/api/profile', requireSession, async (_req, res) => res.json(publicProfile(await getProfile(res.locals.userId))));
 
 const optionalFiscal = z.object({
   rfc: z.string().trim().toUpperCase().refine(value => value === '' || /^[A-Z&Ñ]{3,4}\d{6}[A-Z0-9]{3}$/.test(value), 'RFC inválido').optional(),
@@ -185,9 +192,9 @@ const optionalFiscal = z.object({
     secure: z.boolean().optional(), user: z.string().max(254).optional(), from: z.string().refine(value => value === '' || z.email().safeParse(value).success).optional(), password: z.string().max(512).optional() }).optional(),
 });
 
-app.put('/api/profile', requireSession, checkOrigin, requireCsrf, (req, res) => {
+app.put('/api/profile', requireSession, checkOrigin, requireCsrf, async (req, res) => {
   const values = optionalFiscal.parse(req.body);
-  res.json(updateProfile(res.locals.userId, values));
+  res.json(await updateProfile(res.locals.userId, values));
 });
 
 app.post('/api/csf', requireSession, checkOrigin, requireCsrf, intensiveLimit, limitIntensiveConcurrency, upload.single('file'), async (req, res) => {
@@ -195,8 +202,8 @@ app.post('/api/csf', requireSession, checkOrigin, requireCsrf, intensiveLimit, l
   res.status(201).json(await saveCsf(res.locals.userId, req.file.originalname, req.file.buffer));
 });
 
-app.delete('/api/csf', requireSession, checkOrigin, requireCsrf, (_req, res) => {
-  res.json(deleteCsf(res.locals.userId));
+app.delete('/api/csf', requireSession, checkOrigin, requireCsrf, async (_req, res) => {
+  res.json(await deleteCsf(res.locals.userId));
 });
 
 app.post('/api/tickets', requireSession, checkOrigin, requireCsrf, intensiveLimit, limitIntensiveConcurrency, upload.single('file'), async (req, res) => {
@@ -204,11 +211,11 @@ app.post('/api/tickets', requireSession, checkOrigin, requireCsrf, intensiveLimi
   res.status(201).json(await createTicket(res.locals.userId, req.file.originalname, req.file.buffer));
 });
 
-app.get('/api/tickets', requireSession, (_req, res) => res.json(listTickets(res.locals.userId)));
+app.get('/api/tickets', requireSession, async (_req, res) => res.json(await listTickets(res.locals.userId)));
 app.get('/api/portals', requireSession, (_req, res) => res.json(listPortals()));
 
-app.get('/api/tickets/:id', requireSession, (req, res) => {
-  const ticket = getTicket(res.locals.userId, String(req.params.id));
+app.get('/api/tickets/:id', requireSession, async (req, res) => {
+  const ticket = await getTicket(res.locals.userId, String(req.params.id));
   if (!ticket) { res.status(404).json({ error: 'Ticket no encontrado' }); return; }
   res.json(ticket);
 });
@@ -216,7 +223,7 @@ app.get('/api/tickets/:id', requireSession, (req, res) => {
 app.post('/api/tickets/:id/auto-invoice', requireSession, checkOrigin, requireCsrf,
   intensiveLimit, limitIntensiveConcurrency, async (req, res) => {
     const ticketId = String(req.params.id);
-    if (!getTicket(res.locals.userId, ticketId)) { res.status(404).json({ error: 'Ticket no encontrado' }); return; }
+    if (!await getTicket(res.locals.userId, ticketId)) { res.status(404).json({ error: 'Ticket no encontrado' }); return; }
     const options = z.object({ textoAdicional: z.string().trim().max(500).optional(),
       formaPago: z.string().refine(isFormaPago, 'Forma de pago inválida').optional() }).parse(req.body ?? {});
     res.json(await autoInvoiceTicket(res.locals.userId, ticketId, options));
@@ -247,23 +254,23 @@ app.post('/api/jobs', requireSession, checkOrigin, requireCsrf, intensiveLimit, 
   res.status(201).json(await createInvoiceJob(res.locals.userId, input));
 });
 
-app.get('/api/jobs', requireSession, (_req, res) => res.json(listJobs(res.locals.userId)));
+app.get('/api/jobs', requireSession, async (_req, res) => res.json(await listJobs(res.locals.userId)));
 
-app.get('/api/jobs/:id', requireSession, (req, res) => {
-  const job = getJob(res.locals.userId, String(req.params.id));
+app.get('/api/jobs/:id', requireSession, async (req, res) => {
+  const job = await getJob(res.locals.userId, String(req.params.id));
   if (!job) { res.status(404).json({ error: 'Trabajo no encontrado' }); return; }
-  res.json({ job, events: getJobEvents(res.locals.userId, job.id) });
+  res.json({ job, events: await getJobEvents(res.locals.userId, job.id) });
 });
 
 app.get('/api/jobs/:id/screenshot', requireSession, async (req, res) => {
-  const session = getLiveSession(res.locals.userId, String(req.params.id));
+  const session = await getLiveSession(res.locals.userId, String(req.params.id));
   if (!session) { res.status(409).json({ error: 'No hay navegador esperando una acción' }); return; }
   res.setHeader('Cache-Control', 'no-store');
   res.type('png').send(await session.screenshot());
 });
 
-app.get('/api/jobs/:id/last-screenshot', requireSession, (req, res) => {
-  const screenshot = getJobScreenshot(res.locals.userId, String(req.params.id));
+app.get('/api/jobs/:id/last-screenshot', requireSession, async (req, res) => {
+  const screenshot = await getJobScreenshot(res.locals.userId, String(req.params.id));
   if (!screenshot) { res.status(404).json({ error: 'Captura no disponible' }); return; }
   res.setHeader('Cache-Control', 'no-store');
   res.type('png').send(screenshot);
@@ -277,39 +284,40 @@ app.post('/api/jobs/:id/action', requireSession, checkOrigin, requireCsrf, actio
     z.object({ type: z.literal('press'), key: z.string().max(32) }),
     z.object({ type: z.literal('continue') }), z.object({ type: z.literal('cancel') }),
   ]).parse(req.body);
-  const session = getLiveSession(res.locals.userId, jobId);
+  const session = await getLiveSession(res.locals.userId, jobId);
   if (!session) { res.status(409).json({ error: 'No hay navegador esperando una acción' }); return; }
   if (action.type === 'click') await session.click(action.x, action.y);
   else if (action.type === 'type') await session.type(action.text);
   else if (action.type === 'press') await session.press(action.key);
-  else continueHumanAction(res.locals.userId, jobId, action.type === 'cancel');
+  else await continueHumanAction(res.locals.userId, jobId, action.type === 'cancel');
   res.json({ ok: true });
 });
 
-app.get('/api/files/:id', requireSession, (req, res) => {
-  const { row, data } = getFile(res.locals.userId, String(req.params.id));
+app.get('/api/files/:id', requireSession, async (req, res) => {
+  const { row, data } = await getFile(res.locals.userId, String(req.params.id));
   res.setHeader('Cache-Control', 'no-store');
   res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(row.original_name)}`);
   res.type(row.mime_type).send(data);
 });
 
-app.get('/api/mcp-tokens', requireSession, (_req, res) => {
-  const rows = db.prepare('SELECT id,name,created_at,last_used_at FROM mcp_tokens WHERE user_id=? ORDER BY created_at DESC').all(res.locals.userId) as { id: string; name: string; created_at: string; last_used_at: string | null }[];
+app.get('/api/mcp-tokens', requireSession, async (_req, res) => {
+  const rows = await queryAll<{ id: string; name: string; created_at: string; last_used_at: string | null }>(
+    'SELECT id,name,created_at,last_used_at FROM mcp_tokens WHERE user_id=? ORDER BY created_at DESC', [res.locals.userId]);
   res.json(rows.map(row => ({ id: row.id, name: row.name, createdAt: row.created_at, lastUsedAt: row.last_used_at })));
 });
 
-app.post('/api/mcp-tokens', requireSession, checkOrigin, requireCsrf, (req, res) => {
+app.post('/api/mcp-tokens', requireSession, checkOrigin, requireCsrf, async (req, res) => {
   const { name } = z.object({ name: z.string().trim().min(1).max(80) }).parse(req.body);
-  res.status(201).json(createMcpToken(res.locals.userId, name));
+  res.status(201).json(await createMcpToken(res.locals.userId, name));
 });
 
-app.delete('/api/mcp-tokens/:id', requireSession, checkOrigin, requireCsrf, (req, res) => {
-  db.prepare('DELETE FROM mcp_tokens WHERE id=? AND user_id=?').run(String(req.params.id), res.locals.userId);
+app.delete('/api/mcp-tokens/:id', requireSession, checkOrigin, requireCsrf, async (req, res) => {
+  await execute('DELETE FROM mcp_tokens WHERE id=? AND user_id=?', [String(req.params.id), res.locals.userId]);
   res.json({ ok: true });
 });
 
 const mcpNode = toNodeHandler(mcpHandler, { maxRequestBodySize: 10 * 1024 * 1024 });
-app.all('/mcp', (req, res, next) => {
+app.all('/mcp', async (req, res, next) => {
   const origin = req.headers.origin;
   if (origin) {
     const expected = config.publicOrigin || `${req.protocol}://${req.headers.host}`;
@@ -317,7 +325,7 @@ app.all('/mcp', (req, res, next) => {
   }
   const header = req.headers.authorization;
   const token = header?.startsWith('Bearer ') ? header.slice(7) : '';
-  const userId = getMcpUser(token);
+  const userId = await getMcpUser(token);
   if (!userId) { res.setHeader('WWW-Authenticate', 'Bearer'); res.status(401).json({ error: 'Token MCP inválido' }); return; }
   res.locals.userId = userId;
   (req as Request & { auth?: { token: string; clientId: string; scopes: string[] } }).auth = { token, clientId: userId, scopes: ['invoice:read','invoice:write'] };
@@ -343,7 +351,7 @@ app.use((error: unknown, req: Request, res: Response, next: NextFunction) => {
     res.status(415).json({ error: 'Codificación de solicitud no admitida' }); return;
   }
   const message = error instanceof Error ? error.message : 'Error inesperado';
-  if (message.includes('UNIQUE constraint failed: users.email')) {
+  if ((error as { code?: string })?.code === 'ER_DUP_ENTRY' && /email/i.test(message)) {
     res.status(409).json({ error: 'El correo ya está registrado' });
     return;
   }
@@ -356,6 +364,7 @@ app.use((error: unknown, req: Request, res: Response, next: NextFunction) => {
   res.status(500).json({ error: 'Error interno. Intenta más tarde.' });
 });
 
+await initializeDatabase();
 app.listen(config.port, config.host, () => {
   console.log(`Factura MX en http://${config.host}:${config.port}`);
   startPendingJobs();

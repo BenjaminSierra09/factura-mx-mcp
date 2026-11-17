@@ -1,4 +1,4 @@
-import { db, getProfile, type ProfileRow } from './db.js';
+import { execute, getProfile, queryOne, type ProfileRow } from './db.js';
 import { getTicket, type PublicTicket } from './service.js';
 import { createInvoiceJob, getJob, type PublicJob } from './jobs.js';
 import { getPortalDefinition } from './portals/index.js';
@@ -59,8 +59,8 @@ export function choosePaymentSuggestion(ticket: PublicTicket, textoAdicional?: s
   return { suggestion: supplied && printed?.confianza !== 'alta' ? supplied : printed ?? supplied, conflict: false };
 }
 
-function persistUserPayment(userId: string, ticket: PublicTicket,
-  options: { textoAdicional?: string; formaPago?: string }): void {
+async function persistUserPayment(userId: string, ticket: PublicTicket,
+  options: { textoAdicional?: string; formaPago?: string }): Promise<void> {
   let userSuggestion: (PaymentSuggestion & { confirmada?: boolean }) | null = null;
   if (options.formaPago) {
     if (!isFormaPago(options.formaPago)) throw new Error('Forma de pago inválida');
@@ -71,14 +71,12 @@ function persistUserPayment(userId: string, ticket: PublicTicket,
     userSuggestion = suggestPaymentForm(options.textoAdicional, 'usuario');
   }
   if (!userSuggestion) return;
-  const row = db.prepare('SELECT analysis_json FROM tickets WHERE id=? AND user_id=?')
-    .get(ticket.id, userId) as { analysis_json: string } | undefined;
+  const row = await queryOne<{ analysis_json: string }>('SELECT analysis_json FROM tickets WHERE id=? AND user_id=?', [ticket.id, userId]);
   if (!row) throw new Error('Ticket no encontrado');
   const analysis = JSON.parse(row.analysis_json) as PublicTicket['analysis'];
   if (analysis.formaPagoUsuario?.confirmada && !options.formaPago) return;
   analysis.formaPagoUsuario = userSuggestion;
-  db.prepare('UPDATE tickets SET analysis_json=? WHERE id=? AND user_id=?')
-    .run(JSON.stringify(analysis), ticket.id, userId);
+  await execute('UPDATE tickets SET analysis_json=? WHERE id=? AND user_id=?', [JSON.stringify(analysis), ticket.id, userId]);
   ticket.analysis = analysis;
 }
 
@@ -106,16 +104,16 @@ export function autoInvoiceTicket(userId: string, ticketId: string,
 
 async function runAutoInvoiceTicket(userId: string, ticketId: string,
   options: { textoAdicional?: string; formaPago?: string } = {}): Promise<AutoInvoiceResult> {
-  const ticket = getTicket(userId, ticketId);
+  const ticket = await getTicket(userId, ticketId);
   if (!ticket) throw new Error('Ticket no encontrado');
-  const previous = db.prepare(`SELECT id FROM jobs WHERE user_id=? AND ticket_id=? ORDER BY created_at DESC,id DESC LIMIT 1`)
-    .get(userId, ticketId) as { id: string } | undefined;
-  const existingJob = previous ? getJob(userId, previous.id) : null;
+  const previous = await queryOne<{ id: string }>(`SELECT id FROM jobs WHERE user_id=? AND ticket_id=? ORDER BY created_at DESC,id DESC LIMIT 1`,
+    [userId, ticketId]);
+  const existingJob = previous ? await getJob(userId, previous.id) : null;
   if (existingJob && existingJob.status !== 'failed') {
     return { status: 'started', job: existingJob,
       paymentSuggestion: choosePaymentSuggestion(ticket).suggestion };
   }
-  persistUserPayment(userId, ticket, options);
+  await persistUserPayment(userId, ticket, options);
   const { suggestion, conflict } = choosePaymentSuggestion(ticket, options.textoAdicional, options.formaPago);
   if (previous) {
     if (existingJob) {
@@ -125,7 +123,7 @@ async function runAutoInvoiceTicket(userId: string, ticketId: string,
     }
   }
 
-  const review = assessAutoInvoice(ticket, getProfile(userId));
+  const review = assessAutoInvoice(ticket, await getProfile(userId));
   if (review) return { status: 'needs_review', ...review, ticket, paymentSuggestion: suggestion };
   if (conflict) {
     return { status: 'needs_review', reason: 'payment',

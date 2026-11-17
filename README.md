@@ -16,28 +16,65 @@ Cada comercio tiene un proceso distinto. Hay atajos para algunos emisores conoci
 
 ## 🚀 Empezar
 
+Si vienes de una instalación con SQLite (`app.sqlite`), sigue primero [la migración de datos](#-migrar-datos-desde-sqlite). El cambio a MariaDB no importa cuentas ni tickets automáticamente.
+
 ### Opción A: Docker
 
+Prepara las credenciales de MariaDB antes del primer inicio. Copia el ejemplo, sustituye `DB_PASSWORD` y `DB_ROOT_PASSWORD` por **dos valores aleatorios distintos** (puedes generar cada uno con `openssl rand -hex 32`) y restringe el archivo:
+
 ```bash
+cp .env.example .env
+chmod 600 .env
+# Edita .env y cambia DB_PASSWORD y DB_ROOT_PASSWORD por valores aleatorios distintos.
 docker compose up --build -d
 ```
 
-Abre [http://127.0.0.1:8787](http://127.0.0.1:8787), crea una cuenta y completa tu perfil fiscal. El puerto sólo se publica en `127.0.0.1`. El contenedor ejecuta Chromium sin privilegios, con sandbox y el [perfil seccomp publicado por Playwright](https://github.com/microsoft/playwright/blob/main/utils/docker/seccomp_profile.json), cuya atribución está en [los avisos de terceros](THIRD_PARTY_NOTICES.md).
+Abre [http://127.0.0.1:8787](http://127.0.0.1:8787), crea una cuenta y completa tu perfil fiscal. Los puertos del panel (`8787`) y MariaDB (`3307`) sólo se publican en `127.0.0.1`; dentro de Compose, la aplicación espera a que MariaDB esté lista. Las contraseñas llegan a ambos contenedores como secretos de Compose. El contenedor de la aplicación ejecuta Chromium sin privilegios, con sandbox y el [perfil seccomp publicado por Playwright](https://github.com/microsoft/playwright/blob/main/utils/docker/seccomp_profile.json), cuya atribución está en [los avisos de terceros](THIRD_PARTY_NOTICES.md).
 
-**Respalda el volumen `factura_data` completo.** Contiene la base de datos, los archivos cifrados y `master.key`. Sin esa clave no podrás recuperar tickets, constancias, claves o facturas guardadas.
+**Respalda juntos los volúmenes `mariadb_data` y `factura_data`, y conserva las credenciales.** MariaDB guarda usuarios, perfiles, tickets y trabajos; `factura_data` guarda los archivos cifrados y `master.key`. Sin esa clave no podrás recuperar tickets, constancias, claves o facturas guardadas. Cambiar las contraseñas en `.env` después de inicializar el volumen **no cambia** automáticamente las cuentas de MariaDB.
 
 ### Opción B: Node.js local
 
-Requiere Node.js **22.13 o posterior**:
+Requiere Node.js **22.16 o posterior**:
 
 ```bash
 npm ci
 npx playwright install chromium
 cp .env.example .env
+chmod 600 .env
+# Edita .env y cambia DB_PASSWORD y DB_ROOT_PASSWORD por valores aleatorios distintos.
+docker compose up -d mariadb
 npm run dev
 ```
 
-Después abre [http://127.0.0.1:8787](http://127.0.0.1:8787). Cada usuario puede guardar su propia API key de OpenAI; es opcional para la lectura local y necesaria para las funciones de IA. Los modelos se pueden ajustar con `OPENAI_DISCOVERY_MODEL`, `FACTURADOR_VISION_MODEL` y `FACTURADOR_BROWSER_MODEL`.
+Antes de iniciar, cambia las dos contraseñas de ejemplo en `.env`. El proceso Node se conecta a MariaDB en `127.0.0.1:3307`; si ya tienes una instancia MariaDB, ajusta `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER` y `DB_PASSWORD` y crea la base y el usuario con permisos sobre ella. Después abre [http://127.0.0.1:8787](http://127.0.0.1:8787). Cada usuario puede guardar su propia API key de OpenAI; es opcional para la lectura local y necesaria para las funciones de IA. Los modelos se pueden ajustar con `OPENAI_DISCOVERY_MODEL`, `FACTURADOR_VISION_MODEL` y `FACTURADOR_BROWSER_MODEL`.
+
+### 📦 Migrar datos desde SQLite
+
+La migración es **una acción explícita y de una sola vez**. Detén la versión anterior, respalda `app.sqlite` junto con sus archivos `-wal` y `-shm` si existen, el directorio de archivos cifrados y `master.key`. Prepara una base MariaDB nueva y vacía. El importador crea primero una copia consistente de SQLite, comprueba que todas las tablas de destino estén vacías y conserva los identificadores para que los archivos cifrados sigan asociados a sus registros. No elimines el directorio de datos anterior después de migrar: aún contiene los archivos y la clave.
+
+**Si Node corre en tu máquina** y `DATA_DIR` apunta al directorio anterior:
+
+```bash
+docker compose up -d mariadb
+npm run build
+npm run migrate:sqlite
+npm start
+```
+
+Puedes indicar otra ruta de origen con `npm run migrate:sqlite -- /ruta/completa/app.sqlite`, pero `DATA_DIR` debe apuntar a esa misma carpeta para conservar los archivos y `master.key`. Comprueba antes que `.env` tenga las credenciales de la nueva MariaDB.
+
+**Si la versión anterior corría con Docker Compose**, conserva el volumen `factura_data` del mismo proyecto, prepara `.env` con las nuevas credenciales y ejecuta desde el directorio del proyecto:
+
+```bash
+docker compose stop factura-mx
+docker compose up -d mariadb
+docker compose build factura-mx
+docker compose run --rm factura-mx npm run migrate:sqlite
+docker compose up -d factura-mx
+```
+
+Haz una copia de ambos volúmenes antes de volver a iniciar el panel. El contenedor ejecuta el importador sobre `/app/data/app.sqlite` del volumen anterior y escribe en MariaDB. Si la migración informa que el destino ya contiene datos, detente y revisa la base elegida; no borres tablas a ciegas.
 
 ### Protección del acceso con reCAPTCHA
 
@@ -87,7 +124,7 @@ El archivo `compose.tunnel.yaml` añade un servicio `cloudflared` para publicar 
 
 1. **Prepara el acceso.** El registro público queda activado con reCAPTCHA y límites de intentos. Si sólo quieres cuentas invitadas, crea las cuentas en el panel local y configura `ALLOW_REGISTRATION=false` antes de activar el túnel.
 2. **Configura Cloudflare.** Crea un túnel remoto y una ruta publicada para, por ejemplo, `facturas.tudominio.com` hacia `http://factura-mx:8787`. Verifica que el DNS del subdominio apunte al túnel. Conserva el encabezado `Host` público; si configuras `httpHostHeader`, usa el mismo subdominio.
-3. **Guarda la configuración.** Copia `.env.tunnel.example` a `.env.tunnel`, escribe el subdominio exacto en `APP_TUNNEL_HOSTNAME`, pega el token del túnel en `CLOUDFLARE_TUNNEL_TOKEN` y las claves de reCAPTCHA v2 en `RECAPTCHA_SITE_KEY` y `RECAPTCHA_SECRET_KEY`. Registra ese mismo subdominio en Google reCAPTCHA. Ejecuta `chmod 600 .env.tunnel`. Compose monta los dos secretos en sus respectivos contenedores. No subas este archivo: [el token permite ejecutar una réplica del túnel](https://developers.cloudflare.com/tunnel/reference/tunnel-tokens/).
+3. **Guarda la configuración.** Copia `.env.tunnel.example` a `.env.tunnel`, escribe el subdominio exacto en `APP_TUNNEL_HOSTNAME`, pega el token del túnel en `CLOUDFLARE_TUNNEL_TOKEN` y las claves de reCAPTCHA v2 en `RECAPTCHA_SITE_KEY` y `RECAPTCHA_SECRET_KEY`. Añade también `DB_PASSWORD` y `DB_ROOT_PASSWORD`: si ya iniciabas con Compose, **usa los mismos valores de `.env`** para conservar el acceso al volumen de MariaDB. Registra ese mismo subdominio en Google reCAPTCHA. Ejecuta `chmod 600 .env.tunnel`. Compose monta los secretos en sus respectivos contenedores. No subas este archivo: [el token permite ejecutar una réplica del túnel](https://developers.cloudflare.com/tunnel/reference/tunnel-tokens/).
 4. **Inicia los servicios:**
 
 ```bash
@@ -98,7 +135,7 @@ Prueba `https://facturas.tudominio.com/healthz` y entra al panel en ese mismo or
 
 ## 🔒 Datos, seguridad y límites
 
-- Los archivos de tickets, constancias, facturas, capturas y secretos se cifran con AES-256-GCM. Usuarios, sesiones, perfil y trabajos se guardan en SQLite; **los campos fiscales del perfil, los datos corregidos del ticket y el historial de trabajos permanecen en la base de datos sin ese cifrado de archivo**. Protege y respalda el volumen o directorio de datos completo.
+- Los archivos de tickets, constancias, facturas, capturas y secretos se cifran con AES-256-GCM. Usuarios, sesiones, perfil y trabajos se guardan en MariaDB; **los campos fiscales del perfil, los datos corregidos del ticket y el historial de trabajos permanecen en la base de datos sin ese cifrado de archivo**. Protege y respalda tanto `mariadb_data` como `factura_data`.
 - El navegador sólo abre portales HTTPS públicos, bloquea redes privadas y desactiva service workers. La comprobación DNS previa no sustituye una política de salida de red del servidor ante cambios de DNS entre validación y conexión.
 - Esta instalación está preparada para **una instancia de Node.js**. El navegador mantiene sesiones humanas en memoria. Para varios procesos o servidores hacen falta un worker, una cola persistente, sesiones compartidas y límites compartidos.
 - Los portales pueden cambiar, requerir registro o impedir la automatización. El motor adaptable permite probar emisores nuevos, pero **no cubre de forma garantizada miles de negocios**. Las descargas tienen un límite de procesamiento de 30 MB y el contenedor limita `/tmp` a 512 MB.
@@ -110,13 +147,13 @@ Prueba `https://facturas.tudominio.com/healthz` y entra al panel en ese mismo or
 
 1. Guardar el ticket antes de iniciar OCR y búsqueda, y procesar ambas tareas en segundo plano para resistir esperas y reinicios.
 2. Usar una cola persistente y sesiones de navegador recuperables antes de ejecutar varias instancias.
-3. Cifrar los campos fiscales guardados en SQLite y ofrecer eliminación y retención configurable de tickets.
+3. Cifrar los campos fiscales guardados en MariaDB y ofrecer eliminación y retención configurable de tickets.
 4. Mostrar desde MCP un enlace directo al panel cuando un trámite necesite una acción humana.
 5. Comprobar la autenticidad y vigencia de cada CFDI ante fuentes oficiales antes de indicar que está verificado.
 
 ## 🛠️ Para desarrollar
 
-La API HTTP y el MCP usan **Express 5, TypeScript estricto y Zod**. La interfaz web usa JavaScript sin framework. SQLite guarda el estado; Chromium y Playwright controlan el navegador. Next.js podría servir para una futura interfaz React, pero no sustituye la cola de trabajos ni el servidor MCP.
+La API HTTP y el MCP usan **Express 5, TypeScript estricto y Zod**. La interfaz web usa JavaScript sin framework. MariaDB guarda el estado; Chromium y Playwright controlan el navegador. Next.js podría servir para una futura interfaz React, pero no sustituye la cola de trabajos ni el servidor MCP.
 
 Las operaciones costosas tienen límites por cuenta configurables: `API_EXPENSIVE_LIMIT` (60 por hora), `API_EXPENSIVE_CONCURRENCY` (2 simultáneas), `API_ACTION_LIMIT` (240 acciones de navegador por 15 minutos) y `API_MCP_LIMIT` (300 solicitudes HTTP por hora). MCP cuenta cada petición al endpoint, incluso `tools/list`.
 
@@ -127,4 +164,6 @@ npm run build
 npm audit --omit=dev
 ```
 
-Las pruebas incluyen separación de cuentas, CSRF, subida y descarga protegidas, acceso MCP, PDF y QR locales. Para servirlo detrás de un proxy HTTPS distinto de Cloudflare Tunnel, configura `APP_PUBLIC_ORIGIN` y `APP_ALLOWED_HOSTS`, restringe el registro si corresponde y conserva `data/master.key` o define `APP_MASTER_KEY` (64 caracteres hexadecimales). El proceso no debe exponerse directamente a Internet sin proxy TLS y política de salida de red.
+`npm test` crea y elimina bases temporales en MariaDB. Con la configuración de Compose usa `DB_PORT` y `DB_ROOT_PASSWORD` de `.env`; si usas otra instancia, configura `TEST_DB_HOST`, `TEST_DB_PORT`, `TEST_DB_USER` y `TEST_DB_PASSWORD` con una cuenta que pueda crear bases de prueba. Nunca apuntes esas pruebas a una base con datos reales.
+
+Las pruebas incluyen separación de cuentas, CSRF, subida y descarga protegidas, acceso MCP, PDF y QR locales, persistencia en MariaDB, migración desde SQLite y actualizaciones simultáneas del perfil. Para servirlo detrás de un proxy HTTPS distinto de Cloudflare Tunnel, configura `APP_PUBLIC_ORIGIN` y `APP_ALLOWED_HOSTS`, restringe el registro si corresponde y conserva `data/master.key` o define `APP_MASTER_KEY` (64 caracteres hexadecimales). El proceso no debe exponerse directamente a Internet sin proxy TLS y política de salida de red.

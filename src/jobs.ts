@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import sharp from 'sharp';
-import { db, getProfile, type JobRow, type ProfileRow, type TicketRow } from './db.js';
+import { execute, getProfile, queryAll, queryOne, transaction, type DbClient, type JobRow, type ProfileRow, type TicketRow } from './db.js';
 import { getMasterKey } from './config.js';
 import { decryptText } from './crypto.js';
 import { getFile, saveJobScreenshot } from './storage.js';
@@ -21,8 +21,12 @@ const PRIMERA_URL = 'https://www.facturaelectronicagfa.mx/';
 const PRIMERA_EMAIL = 'cfdiboletoprimeraplus@flecha-amarilla.com';
 const liveSessions = new Map<string, HumanActionSession>();
 let active = false;
+let wakeRequested = false;
 
-export function startPendingJobs(): void { queueMicrotask(() => void runNext()); }
+export function startPendingJobs(): void {
+  wakeRequested = true;
+  queueMicrotask(() => void runNext());
+}
 
 export interface JobRequest {
   ticketId: string;
@@ -51,9 +55,9 @@ export interface PublicJob {
   createdAt: string; updatedAt: string;
 }
 
-function publicJob(row: JobRow): PublicJob {
+async function publicJob(row: JobRow): Promise<PublicJob> {
   const result = row.result_json ? JSON.parse(row.result_json) as Record<string, unknown> : null;
-  if (result) result.retrySafe = isSafeRetry(row);
+  if (result) result.retrySafe = await isSafeRetry(row);
   const request = JSON.parse(row.request_json) as StoredJobRequest;
   return {
     id: row.id, ticketId: row.ticket_id, provider: request.provider, status: row.status, portalUrl: row.portal_url,
@@ -62,7 +66,7 @@ function publicJob(row: JobRow): PublicJob {
   };
 }
 
-function isSafeRetry(row: JobRow): boolean {
+async function isSafeRetry(row: JobRow, reader: Pick<DbClient, 'queryAll'> = { queryAll }): Promise<boolean> {
   if (row.status !== 'needs_action' || liveSessions.has(row.id) ||
       row.error_text?.includes('interrumpido') || !row.result_json) return false;
   const request = JSON.parse(row.request_json) as StoredJobRequest;
@@ -70,30 +74,30 @@ function isSafeRetry(row: JobRow): boolean {
   const result = JSON.parse(row.result_json) as { reason?: string; steps?: string[]; documents?: SavedDocument[] };
   if (['invoice_not_downloaded', 'submission_pending'].includes(result.reason || '') ||
       result.documents?.some(document => document.valid)) return false;
-  const events = db.prepare('SELECT message FROM job_events WHERE job_id=?').all(row.id) as { message: string }[];
+  const events = await reader.queryAll<{ message: string }>('SELECT message FROM job_events WHERE job_id=?', [row.id]);
   const actions = [...(result.steps || []), ...events.map(item => item.message)].join('\n');
   return !/emisi[oó]n solicitada|confirmaci[oó]n de env[ií]o manual|hacer clic en.{0,100}\b(?:emitir|generar|facturar|confirmar|solicitar|enviar)\b/i.test(actions);
 }
 
-export function getJob(userId: string, jobId: string): PublicJob | null {
-  const row = db.prepare('SELECT * FROM jobs WHERE id=? AND user_id=?').get(jobId, userId) as JobRow | undefined;
+export async function getJob(userId: string, jobId: string): Promise<PublicJob | null> {
+  const row = await queryOne<JobRow>('SELECT * FROM jobs WHERE id=? AND user_id=?', [jobId, userId]);
   return row ? publicJob(row) : null;
 }
 
-export function listJobs(userId: string): PublicJob[] {
-  const rows = db.prepare('SELECT * FROM jobs WHERE user_id=? ORDER BY created_at DESC LIMIT 100').all(userId) as JobRow[];
-  return rows.map(publicJob);
+export async function listJobs(userId: string): Promise<PublicJob[]> {
+  const rows = await queryAll<JobRow>('SELECT * FROM jobs WHERE user_id=? ORDER BY created_at DESC LIMIT 100', [userId]);
+  return Promise.all(rows.map(publicJob));
 }
 
-export function getJobEvents(userId: string, jobId: string): { kind: string; message: string; createdAt: string }[] {
-  const exists = db.prepare('SELECT 1 FROM jobs WHERE id=? AND user_id=?').get(jobId, userId);
+export async function getJobEvents(userId: string, jobId: string): Promise<{ kind: string; message: string; createdAt: string }[]> {
+  const exists = await queryOne('SELECT 1 FROM jobs WHERE id=? AND user_id=?', [jobId, userId]);
   if (!exists) throw new Error('Trabajo no encontrado');
-  return (db.prepare('SELECT kind,message,created_at FROM job_events WHERE job_id=? ORDER BY id').all(jobId) as { kind: string; message: string; created_at: string }[])
+  return (await queryAll<{ kind: string; message: string; created_at: string }>('SELECT kind,message,created_at FROM job_events WHERE job_id=? ORDER BY id', [jobId]))
     .map(event => ({ kind: event.kind, message: event.message, createdAt: event.created_at }));
 }
 
-function event(jobId: string, kind: string, message: string): void {
-  db.prepare('INSERT INTO job_events (job_id,kind,message) VALUES (?,?,?)').run(jobId, kind, message.slice(0, 1000));
+async function event(jobId: string, kind: string, message: string): Promise<void> {
+  await execute('INSERT INTO job_events (job_id,kind,message) VALUES (?,?,?)', [jobId, kind, message.slice(0, 1000)]);
 }
 
 function safeJobError(error: unknown): string {
@@ -105,9 +109,9 @@ function safeJobError(error: unknown): string {
   return 'No se pudo completar el trámite por un error interno. Revisa la configuración y vuelve a intentarlo.';
 }
 
-function setStatus(jobId: string, status: JobRow['status'], error: string | null = null, result?: object): void {
-  db.prepare('UPDATE jobs SET status=?, error_text=?, result_json=COALESCE(?,result_json), updated_at=CURRENT_TIMESTAMP WHERE id=?')
-    .run(status, error, result ? JSON.stringify(result) : null, jobId);
+async function setStatus(jobId: string, status: JobRow['status'], error: string | null = null, result?: object): Promise<void> {
+  await execute('UPDATE jobs SET status=?, error_text=?, result_json=COALESCE(?,result_json), updated_at=CURRENT_TIMESTAMP(3) WHERE id=?',
+    [status, error, result ? JSON.stringify(result) : null, jobId]);
 }
 
 function validateFiscal(profile: ProfileRow): void {
@@ -145,9 +149,9 @@ function normalizeTicketData(analysis: TicketAnalysis, edits?: JobRequest['ticke
 }
 
 export async function createInvoiceJob(userId: string, input: JobRequest): Promise<PublicJob> {
-  const ticket = db.prepare('SELECT * FROM tickets WHERE id=? AND user_id=?').get(input.ticketId, userId) as TicketRow | undefined;
+  const ticket = await queryOne<TicketRow>('SELECT * FROM tickets WHERE id=? AND user_id=?', [input.ticketId, userId]);
   if (!ticket) throw new Error('Ticket no encontrado');
-  const profile = getProfile(userId);
+  const profile = await getProfile(userId);
   validateFiscal(profile);
   const analysis = JSON.parse(ticket.analysis_json) as TicketAnalysis;
   const detection = detectPortal(analysis);
@@ -186,56 +190,91 @@ export async function createInvoiceJob(userId: string, input: JobRequest): Promi
   if (provider === 'primera_plus' && token && !/^[A-Z0-9]{9,25}$/.test(token)) throw new Error('El token de Primera Plus debe tener entre 9 y 25 caracteres alfanuméricos');
   if (input.channel === 'email' && provider === 'primera_plus' && token) throw new Error('El correo automático de Primera Plus es para boletos sin token');
   if (input.operation === 'recover' && !token) throw new Error('Ingresa el token para recuperar el CFDI');
-  const existing = db.prepare(`SELECT id,status FROM jobs WHERE user_id=? AND ticket_id=? AND status IN ('queued','running','needs_action','submitted','completed','email_sent') ORDER BY created_at DESC LIMIT 1`)
-    .get(userId, input.ticketId) as { id: string; status: string } | undefined;
-  const existingRecovery = input.operation === 'recover' ? db.prepare(`SELECT id FROM jobs WHERE user_id=? AND ticket_id=? AND json_extract(request_json,'$.operation')='recover' AND status IN ('queued','running','needs_action') LIMIT 1`)
-    .get(userId, input.ticketId) as { id: string } | undefined : undefined;
-  if (existingRecovery) throw new Error(`Ya hay una recuperación en curso (${existingRecovery.id})`);
-  const canRetry = existing && input.force && isSafeRetry(db.prepare('SELECT * FROM jobs WHERE id=?').get(existing.id) as JobRow);
-  if (existing && input.operation !== 'recover' && !canRetry) {
-    throw new Error(`Este ticket ya tiene un trabajo activo o enviado (${existing.id}). Revísalo antes de volver a facturar.`);
-  }
   const id = randomUUID();
-  const request: StoredJobRequest = { ...input, provider, token, portalUrl, recipientEmail, ticketData, allowedHosts: [...definition.allowedHosts],
-    fiscalSnapshot: { rfc: profile.rfc, nombre: profile.nombre, codigoPostal: profile.codigo_postal,
-      regimenFiscal: profile.regimen_fiscal, usoCfdi: profile.uso_cfdi,
-      facturaEmail: profile.factura_email, domicilio: profile.domicilio },
-    csfFileId: profile.csf_file_id,
-  };
-  db.transaction(() => {
-    db.prepare('INSERT INTO jobs (id,user_id,ticket_id,portal_url,status,request_json) VALUES (?,?,?,?,?,?)')
-      .run(id, userId, input.ticketId, portalUrl, 'queued', JSON.stringify(request));
-    event(id, 'queued', 'Trabajo en cola');
-    if (canRetry && existing) {
-      setStatus(existing.id, 'failed', `Reintentado en el trabajo ${id}; se revisó que el portal no registró una emisión en el historial.`);
-      event(existing.id, 'restarted', `El usuario inició un nuevo intento: ${id}`);
+  await transaction(async tx => {
+    // Lock the ticket row so two requests cannot enqueue the same ticket at once.
+    const locked = await tx.queryOne<{ id: string }>('SELECT id FROM tickets WHERE id=? AND user_id=? FOR UPDATE', [input.ticketId, userId]);
+    if (!locked) throw new Error('Ticket no encontrado');
+    // Hold the same profile lock as CSF replacement/deletion until the job has
+    // captured its fiscal snapshot and the referenced CSF file ID.
+    const lockedProfile = await tx.queryOne<ProfileRow>('SELECT * FROM profiles WHERE user_id=? FOR UPDATE', [userId]);
+    if (!lockedProfile) throw new Error('Perfil no encontrado');
+    validateFiscal(lockedProfile);
+    if (input.channel === 'email' && (!lockedProfile.smtp_host || !lockedProfile.smtp_user || !lockedProfile.smtp_pass_enc || !lockedProfile.smtp_from)) {
+      throw new Error('Configura SMTP en tu perfil para enviar solicitudes por correo');
     }
-  })();
-  queueMicrotask(() => void runNext());
-  return getJob(userId, id)!;
+    if (input.channel === 'email' && provider === 'primera_plus' && !lockedProfile.domicilio && !(input.includeCsf && lockedProfile.csf_file_id)) {
+      throw new Error('Para la solicitud por correo, agrega tu domicilio completo o adjunta tu constancia');
+    }
+    if (input.channel === 'email' && input.includeCsf && !lockedProfile.csf_file_id) {
+      throw new Error('No tienes una constancia guardada para adjuntar');
+    }
+    if (input.channel === 'portal' && definition.automation === 'ai' && !lockedProfile.openai_key_enc) {
+      throw new Error('Guarda tu API key de OpenAI para explorar y automatizar este portal');
+    }
+    const existing = await tx.queryOne<{ id: string; status: string }>(
+      `SELECT id,status FROM jobs WHERE user_id=? AND ticket_id=? AND status IN ('queued','running','needs_action','submitted','completed','email_sent') ORDER BY created_at DESC LIMIT 1 FOR UPDATE`,
+      [userId, input.ticketId]);
+    const existingRecovery = input.operation === 'recover' ? await tx.queryOne<{ id: string }>(
+      `SELECT id FROM jobs WHERE user_id=? AND ticket_id=? AND JSON_UNQUOTE(JSON_EXTRACT(request_json,'$.operation'))='recover' AND status IN ('queued','running','needs_action') LIMIT 1 FOR UPDATE`,
+      [userId, input.ticketId]) : undefined;
+    if (existingRecovery) throw new Error(`Ya hay una recuperación en curso (${existingRecovery.id})`);
+    const retryRow = existing && input.force ? await tx.queryOne<JobRow>('SELECT * FROM jobs WHERE id=? FOR UPDATE', [existing.id]) : undefined;
+    const canRetry = Boolean(retryRow && await isSafeRetry(retryRow, tx));
+    if (existing && input.operation !== 'recover' && !canRetry) {
+      throw new Error(`Este ticket ya tiene un trabajo activo o enviado (${existing.id}). Revísalo antes de volver a facturar.`);
+    }
+    const request: StoredJobRequest = { ...input, provider, token, portalUrl, recipientEmail, ticketData,
+      allowedHosts: [...definition.allowedHosts],
+      fiscalSnapshot: { rfc: lockedProfile.rfc, nombre: lockedProfile.nombre, codigoPostal: lockedProfile.codigo_postal,
+        regimenFiscal: lockedProfile.regimen_fiscal, usoCfdi: lockedProfile.uso_cfdi,
+        facturaEmail: lockedProfile.factura_email, domicilio: lockedProfile.domicilio },
+      csfFileId: lockedProfile.csf_file_id,
+    };
+    await tx.execute('INSERT INTO jobs (id,user_id,ticket_id,portal_url,status,request_json) VALUES (?,?,?,?,?,?)',
+      [id, userId, input.ticketId, portalUrl, 'queued', JSON.stringify(request)]);
+    await tx.execute('INSERT INTO job_events (job_id,kind,message) VALUES (?,?,?)', [id, 'queued', 'Trabajo en cola']);
+    if (canRetry && existing) {
+      await tx.execute('UPDATE jobs SET status=?, error_text=?, updated_at=CURRENT_TIMESTAMP(3) WHERE id=?',
+        ['failed', `Reintentado en el trabajo ${id}; se revisó que el portal no registró una emisión en el historial.`, existing.id]);
+      await tx.execute('INSERT INTO job_events (job_id,kind,message) VALUES (?,?,?)',
+        [existing.id, 'restarted', `El usuario inició un nuevo intento: ${id}`]);
+    }
+  });
+  startPendingJobs();
+  return (await getJob(userId, id))!;
 }
 
 async function runNext(): Promise<void> {
-  if (active) return;
-  const row = db.prepare("SELECT * FROM jobs WHERE status='queued' ORDER BY created_at,id LIMIT 1").get() as JobRow | undefined;
-  if (!row) return;
-  // A conditional UPDATE claims the job atomically if another process reads
-  // the same queued row. The deployment still uses one app instance because
-  // live browser sessions are held in this process.
-  const claimed = db.prepare("UPDATE jobs SET status='running', updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='queued'").run(row.id);
-  if (claimed.changes !== 1) { queueMicrotask(() => void runNext()); return; }
+  if (active) { wakeRequested = true; return; }
   active = true;
-  try { await runJob(row); }
-  catch (error) {
-    const message = safeJobError(error);
-    setStatus(row.id, 'failed', message);
-    event(row.id, 'error', message);
+  wakeRequested = false;
+  let shouldCheckNext = false;
+  try {
+    const row = await queryOne<JobRow>("SELECT * FROM jobs WHERE status='queued' ORDER BY created_at,id LIMIT 1");
+    if (!row) return;
+    shouldCheckNext = true;
+    // The conditional update also protects against another app process.
+    const claimed = await execute("UPDATE jobs SET status='running', updated_at=CURRENT_TIMESTAMP(3) WHERE id=? AND status='queued'", [row.id]);
+    if (claimed.changes !== 1) return;
+    try { await runJob(row); }
+    catch (error) {
+      const message = safeJobError(error);
+      await setStatus(row.id, 'failed', message);
+      await event(row.id, 'error', message);
+    }
+  } catch (error) {
+    console.error('No se pudo procesar la cola de facturas', { type: error instanceof Error ? error.name : typeof error });
+    shouldCheckNext = false;
+    setTimeout(() => void runNext(), 1000);
+  } finally {
+    active = false;
+    if (shouldCheckNext || wakeRequested) startPendingJobs();
   }
-  finally { active = false; queueMicrotask(() => void runNext()); }
 }
 
 async function makePortalTicket(workDir: string, ticket: TicketRow, provider: JobRequest['provider'], token?: string): Promise<string[]> {
-  const stored = getFile(ticket.user_id, ticket.file_id);
+  const stored = await getFile(ticket.user_id, ticket.file_id);
   if (provider === 'primera_plus' && token) return [];
   const original = stored.data;
   let data = original;
@@ -258,8 +297,8 @@ async function makePortalTicket(workDir: string, ticket: TicketRow, provider: Jo
   return [filePath];
 }
 
-function emailAttachment(userId: string, fileId: string): InvoiceEmailAttachment {
-  const file = getFile(userId, fileId);
+async function emailAttachment(userId: string, fileId: string): Promise<InvoiceEmailAttachment> {
+  const file = await getFile(userId, fileId);
   const contentType = file.row.mime_type;
   if (!['application/pdf', 'image/jpeg', 'image/png', 'image/webp'].includes(contentType))
     throw new Error('El adjunto tiene un formato no admitido');
@@ -271,7 +310,7 @@ async function sendReviewedEmail(row: JobRow, request: StoredJobRequest, profile
   const recipientEmail = fixedRecipient || request.recipientEmail;
   if (!recipientEmail) throw new Error('Falta el destinatario revisado');
   const password = decryptText(profile.smtp_pass_enc!, getMasterKey(), `${row.user_id}:smtp_password`);
-  const ticket = db.prepare('SELECT * FROM tickets WHERE id=? AND user_id=?').get(row.ticket_id, row.user_id) as TicketRow;
+  const ticket = (await queryOne<TicketRow>('SELECT * FROM tickets WHERE id=? AND user_id=?', [row.ticket_id, row.user_id]))!;
   const analysis = JSON.parse(ticket.analysis_json) as TicketAnalysis;
   const issuerName = analysis.empresa || (typeof request.ticketData.marca === 'string' ? request.ticketData.marca : '') ||
     getPortalDefinition(request.provider).label;
@@ -284,22 +323,22 @@ async function sendReviewedEmail(row: JobRow, request: StoredJobRequest, profile
       regimenFiscal: profile.regimen_fiscal, usoCfdi: profile.uso_cfdi,
       email: profile.factura_email, domicilio: profile.domicilio },
     formaPago: typeof request.ticketData.formaPago === 'string' ? request.ticketData.formaPago : undefined,
-    ticket: emailAttachment(row.user_id, ticket.file_id),
-    ...(request.includeCsf && profile.csf_file_id ? { csf: emailAttachment(row.user_id, profile.csf_file_id) } : {}),
+    ticket: await emailAttachment(row.user_id, ticket.file_id),
+    ...(request.includeCsf && profile.csf_file_id ? { csf: await emailAttachment(row.user_id, profile.csf_file_id) } : {}),
   });
   return result.recipientEmail;
 }
 
 async function runJob(row: JobRow): Promise<void> {
   const request = JSON.parse(row.request_json) as StoredJobRequest;
-  const currentProfile = getProfile(row.user_id);
+  const currentProfile = await getProfile(row.user_id);
   const snapshot = request.fiscalSnapshot;
   const profile: ProfileRow = snapshot ? { ...currentProfile, rfc: snapshot.rfc, nombre: snapshot.nombre,
     codigo_postal: snapshot.codigoPostal, regimen_fiscal: snapshot.regimenFiscal,
     uso_cfdi: snapshot.usoCfdi, factura_email: snapshot.facturaEmail, domicilio: snapshot.domicilio,
     csf_file_id: request.csfFileId } : currentProfile;
-  setStatus(row.id, 'running');
-  event(row.id, 'started', request.channel === 'email' ? 'Preparando correo' : 'Abriendo portal');
+  await setStatus(row.id, 'running');
+  await event(row.id, 'started', request.channel === 'email' ? 'Preparando correo' : 'Abriendo portal');
   const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'factura-job-'));
   fs.chmodSync(workDir, 0o700);
   try {
@@ -307,15 +346,15 @@ async function runJob(row: JobRow): Promise<void> {
       const recipient = await sendReviewedEmail(row, request, profile,
         request.provider === 'primera_plus' ? PRIMERA_EMAIL : undefined);
       const result = { message: `Solicitud enviada a ${recipient}. La factura queda pendiente de respuesta.`, documents: [] };
-      setStatus(row.id, 'email_sent', null, result);
-      event(row.id, 'email_sent', result.message);
+      await setStatus(row.id, 'email_sent', null, result);
+      await event(row.id, 'email_sent', result.message);
       return;
     }
-    const ticket = db.prepare('SELECT * FROM tickets WHERE id=?').get(row.ticket_id) as TicketRow;
+    const ticket = (await queryOne<TicketRow>('SELECT * FROM tickets WHERE id=?', [row.ticket_id]))!;
     const ticketFiles = await makePortalTicket(workDir, ticket, request.provider, request.token);
     let csfFile: string | undefined;
     if (request.includeCsf && profile.csf_file_id) {
-      const csf = getFile(row.user_id, profile.csf_file_id);
+      const csf = await getFile(row.user_id, profile.csf_file_id);
       const ext = csf.row.mime_type === 'application/pdf' ? '.pdf' : csf.row.mime_type === 'image/png' ? '.png' : '.jpg';
       csfFile = path.join(workDir, `constancia${ext}`);
       fs.writeFileSync(csfFile, csf.data, { mode: 0o600 });
@@ -334,7 +373,10 @@ async function runJob(row: JobRow): Promise<void> {
       browser: { headless: process.env.HEADLESS !== 'false' },
     }, {
       onEvent: emitted => event(row.id, emitted.type, emitted.message),
-      onHumanAction: session => { liveSessions.set(row.id, session); setStatus(row.id, 'needs_action'); },
+      onHumanAction: async session => {
+        liveSessions.set(row.id, session);
+        await setStatus(row.id, 'needs_action');
+      },
     });
     liveSessions.delete(row.id);
     const documents: SavedDocument[] = [];
@@ -346,7 +388,7 @@ async function runJob(row: JobRow): Promise<void> {
       try { documents.push(...await saveInvoiceArtifact(row.user_id, download.filename, fs.readFileSync(resolved), profile.rfc)); }
       catch (error) {
         console.error('No se pudo guardar una descarga', { type: error instanceof Error ? error.name : typeof error });
-        event(row.id, 'download_error', 'No se pudo guardar una descarga del portal.');
+        await event(row.id, 'download_error', 'No se pudo guardar una descarga del portal.');
       }
     }
     const lastScreenshot = automation.screenshots.at(-1);
@@ -356,12 +398,12 @@ async function runJob(row: JobRow): Promise<void> {
     const result = serializeResult(automation, documents);
     const hasInvoice = documents.some(document => document.valid);
     const status = hasInvoice ? 'completed' : automation.status === 'failed' ? 'failed' : automation.status === 'needs_action' ? 'needs_action' : 'submitted';
-    setStatus(row.id, status, automation.status === 'failed' ? automation.message : null, result);
-    event(row.id, status, result.message);
+    await setStatus(row.id, status, automation.status === 'failed' ? automation.message : null, result);
+    await event(row.id, status, result.message);
   } catch (error) {
     const message = safeJobError(error);
-    setStatus(row.id, 'failed', message);
-    event(row.id, 'error', message);
+    await setStatus(row.id, 'failed', message);
+    await event(row.id, 'error', message);
   } finally {
     liveSessions.delete(row.id);
     fs.rmSync(workDir, { recursive: true, force: true });
@@ -375,15 +417,15 @@ function serializeResult(result: AutomationResult, documents: SavedDocument[]): 
   };
 }
 
-export function getLiveSession(userId: string, jobId: string): HumanActionSession | null {
-  const row = db.prepare('SELECT 1 FROM jobs WHERE id=? AND user_id=?').get(jobId, userId);
+export async function getLiveSession(userId: string, jobId: string): Promise<HumanActionSession | null> {
+  const row = await queryOne('SELECT 1 FROM jobs WHERE id=? AND user_id=?', [jobId, userId]);
   return row ? liveSessions.get(jobId) ?? null : null;
 }
 
-export function continueHumanAction(userId: string, jobId: string, cancel = false): void {
-  const session = getLiveSession(userId, jobId);
+export async function continueHumanAction(userId: string, jobId: string, cancel = false): Promise<void> {
+  const session = await getLiveSession(userId, jobId);
   if (!session) throw new Error('No hay una sesión de navegador activa');
   liveSessions.delete(jobId);
-  if (cancel) { session.cancel(); event(jobId, 'cancelled', 'Acción cancelada'); }
-  else { setStatus(jobId, 'running'); session.continue(); event(jobId, 'resumed', 'Continuando automatización'); }
+  if (cancel) { session.cancel(); await event(jobId, 'cancelled', 'Acción cancelada'); }
+  else { await setStatus(jobId, 'running'); session.continue(); await event(jobId, 'resumed', 'Continuando automatización'); }
 }

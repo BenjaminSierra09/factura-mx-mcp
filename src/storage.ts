@@ -4,7 +4,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { config, getMasterKey } from './config.js';
 import { encrypt, decrypt } from './crypto.js';
-import { db, type FileRow } from './db.js';
+import { execute, queryOne, type FileRow } from './db.js';
 
 const fileDir = path.join(config.dataDir, 'files');
 const screenshotDir = path.join(config.dataDir, 'screenshots');
@@ -22,7 +22,7 @@ export function sniffMime(data: Buffer): string | null {
   return null;
 }
 
-export function saveFile(userId: string, kind: StoredKind, originalName: string, data: Buffer): FileRow {
+export async function saveFile(userId: string, kind: StoredKind, originalName: string, data: Buffer): Promise<FileRow> {
   const mime = sniffMime(data);
   const allowed = kind === 'invoice_xml' ? ['application/xml'] : kind === 'invoice_pdf' ? ['application/pdf'] : ['application/pdf','image/png','image/jpeg','image/webp'];
   if (!mime || !allowed.includes(mime)) throw new Error('Formato de archivo no admitido');
@@ -33,8 +33,8 @@ export function saveFile(userId: string, kind: StoredKind, originalName: string,
   const filename = path.join(fileDir, `${id}.bin`);
   fs.writeFileSync(filename, encrypted, { flag: 'wx', mode: 0o600 });
   try {
-    db.prepare('INSERT INTO files (id,user_id,kind,original_name,mime_type,size_bytes) VALUES (?,?,?,?,?,?)')
-      .run(id, userId, kind, row.original_name, mime, data.length);
+    await execute('INSERT INTO files (id,user_id,kind,original_name,mime_type,size_bytes) VALUES (?,?,?,?,?,?)',
+      [id, userId, kind, row.original_name, mime, data.length]);
   } catch (error) {
     fs.rmSync(filename, { force: true });
     throw error;
@@ -42,15 +42,15 @@ export function saveFile(userId: string, kind: StoredKind, originalName: string,
   return row;
 }
 
-export function getFile(userId: string, fileId: string): { row: FileRow; data: Buffer } {
-  const row = db.prepare('SELECT * FROM files WHERE id=? AND user_id=?').get(fileId, userId) as FileRow | undefined;
+export async function getFile(userId: string, fileId: string): Promise<{ row: FileRow; data: Buffer }> {
+  const row = await queryOne<FileRow>('SELECT * FROM files WHERE id=? AND user_id=?', [fileId, userId]);
   if (!row) throw new Error('Archivo no encontrado');
   const encrypted = fs.readFileSync(path.join(fileDir, `${row.id}.bin`));
   return { row, data: decrypt(encrypted, getMasterKey(), `${userId}:${row.id}:${row.kind}`) };
 }
 
 export async function withTemporaryFile<T>(userId: string, fileId: string, fn: (filePath: string, row: FileRow) => Promise<T>): Promise<T> {
-  const { row, data } = getFile(userId, fileId);
+  const { row, data } = await getFile(userId, fileId);
   const temporaryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'factura-mx-'));
   fs.chmodSync(temporaryDir, 0o700);
   const ext = row.mime_type === 'application/pdf' ? '.pdf' : row.mime_type === 'image/png' ? '.png' : row.mime_type === 'image/webp' ? '.webp' : row.mime_type === 'application/xml' ? '.xml' : '.jpg';
@@ -60,10 +60,10 @@ export async function withTemporaryFile<T>(userId: string, fileId: string, fn: (
   finally { fs.rmSync(temporaryDir, { recursive: true, force: true }); }
 }
 
-export function removeFile(userId: string, fileId: string): void {
-  const row = db.prepare('SELECT id FROM files WHERE id=? AND user_id=?').get(fileId, userId) as { id: string } | undefined;
+export async function removeFile(userId: string, fileId: string): Promise<void> {
+  const row = await queryOne<{ id: string }>('SELECT id FROM files WHERE id=? AND user_id=?', [fileId, userId]);
   if (!row) return;
-  db.prepare('DELETE FROM files WHERE id=? AND user_id=?').run(fileId, userId);
+  await execute('DELETE FROM files WHERE id=? AND user_id=?', [fileId, userId]);
   fs.rmSync(path.join(fileDir, `${fileId}.bin`), { force: true });
 }
 
@@ -72,8 +72,8 @@ export function saveJobScreenshot(userId: string, jobId: string, data: Buffer): 
   fs.writeFileSync(path.join(screenshotDir, `${jobId}.bin`), encrypt(data, getMasterKey(), `${userId}:${jobId}:screenshot`), { mode: 0o600 });
 }
 
-export function getJobScreenshot(userId: string, jobId: string): Buffer | null {
-  const allowed = db.prepare('SELECT 1 FROM jobs WHERE id=? AND user_id=?').get(jobId, userId);
+export async function getJobScreenshot(userId: string, jobId: string): Promise<Buffer | null> {
+  const allowed = await queryOne('SELECT 1 FROM jobs WHERE id=? AND user_id=?', [jobId, userId]);
   if (!allowed) return null;
   const filePath = path.join(screenshotDir, `${jobId}.bin`);
   if (!fs.existsSync(filePath)) return null;

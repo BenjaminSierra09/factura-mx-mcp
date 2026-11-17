@@ -3,6 +3,12 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { randomBytes } from 'node:crypto';
 
+function dbPassword(): string {
+  const file = process.env.DB_PASSWORD_FILE;
+  if (file) return fs.readFileSync(file, 'utf8').replace(/\r?\n$/, '');
+  return process.env.DB_PASSWORD ?? '';
+}
+
 export const config = {
   host: process.env.HOST || '127.0.0.1',
   port: Number(process.env.PORT || 8787),
@@ -10,6 +16,13 @@ export const config = {
   headless: process.env.HEADLESS !== 'false',
   publicOrigin: process.env.APP_PUBLIC_ORIGIN || '',
   allowedHosts: (process.env.APP_ALLOWED_HOSTS || 'localhost,127.0.0.1,::1').split(',').map(x => x.trim()).filter(Boolean),
+  db: {
+    host: process.env.DB_HOST || '127.0.0.1',
+    port: Number(process.env.DB_PORT || 3306),
+    user: process.env.DB_USER || 'factura',
+    password: dbPassword(),
+    database: process.env.DB_NAME || 'factura_mx',
+  },
 };
 
 export function getMasterKey(): Buffer {

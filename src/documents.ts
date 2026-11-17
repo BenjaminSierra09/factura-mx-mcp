@@ -60,12 +60,12 @@ export async function saveInvoiceArtifact(userId: string, filename: string, data
       uuid = text.toUpperCase().match(/\b[0-9A-F]{8}(?:-[0-9A-F]{4}){3}-[0-9A-F]{12}\b/)?.[0];
       valid = Boolean(uuid && text.toUpperCase().includes(expectedRfc.toUpperCase()) && /(?:FOLIO\s+FISCAL|UUID|TIMBRE\s+FISCAL)/i.test(text));
     } catch { /* Store the PDF, but do not call it a verified CFDI. */ }
-    const row = saveFile(userId, 'invoice_pdf', filename, data);
+    const row = await saveFile(userId, 'invoice_pdf', filename, data);
     return [{ fileId: row.id, filename: row.original_name, kind: 'pdf', valid, ...(uuid ? { uuid } : {}) }];
   }
   if (lower.endsWith('.xml') && data.toString('utf8', 0, 1000).includes('<')) {
     const inspected = inspectCfdiXml(data, expectedRfc);
-    const row = saveFile(userId, 'invoice_xml', filename, data);
+    const row = await saveFile(userId, 'invoice_xml', filename, data);
     return [{ fileId: row.id, filename: row.original_name, kind: 'xml', valid: inspected.valid, uuid: inspected.uuid, receptorRfc: inspected.receptorRfc }];
   }
   return [];

@@ -35,7 +35,7 @@ function createServer(userId: string): McpServer {
     title: 'Consultar perfil fiscal',
     description: 'Consulta los campos CFDI 4.0 del usuario autenticado y si tiene constancia y API key configuradas. Nunca devuelve secretos ni la constancia.',
   }, async () => {
-    try { return answer(publicProfile(getProfile(userId))); }
+    try { return answer(publicProfile(await getProfile(userId))); }
     catch (cause) { return error(cause); }
   });
 
@@ -68,7 +68,7 @@ function createServer(userId: string): McpServer {
     try {
       const uploaded = await createTicket(userId, filename, decodeTicketFile(base64));
       const result = await autoInvoiceTicket(userId, uploaded.ticket.id, { textoAdicional });
-      return answer({ ticket: getTicket(userId, uploaded.ticket.id) ?? uploaded.ticket, result,
+      return answer({ ticket: await getTicket(userId, uploaded.ticket.id) ?? uploaded.ticket, result,
         ...(uploaded.warning ? { warning: uploaded.warning } : {}) });
     } catch (cause) { return error(cause); }
   });
@@ -77,7 +77,7 @@ function createServer(userId: string): McpServer {
     title: 'Listar tickets',
     description: 'Lista los tickets del usuario con sus campos extraídos y el identificador necesario para iniciar la factura.',
   }, async () => {
-    try { return answer(listTickets(userId)); }
+    try { return answer(await listTickets(userId)); }
     catch (cause) { return error(cause); }
   });
 
@@ -130,9 +130,9 @@ function createServer(userId: string): McpServer {
     inputSchema: z.object({ jobId: z.uuid() }),
   }, async ({ jobId }) => {
     try {
-      const job = getJob(userId, jobId);
+      const job = await getJob(userId, jobId);
       if (!job) throw new Error('Trabajo no encontrado');
-      return answer({ job, events: getJobEvents(userId, jobId) });
+      return answer({ job, events: await getJobEvents(userId, jobId) });
     } catch (cause) { return error(cause); }
   });
 
@@ -140,7 +140,7 @@ function createServer(userId: string): McpServer {
     title: 'Listar solicitudes',
     description: 'Lista las solicitudes de factura del usuario y su estado actual.',
   }, async () => {
-    try { return answer(listJobs(userId)); }
+    try { return answer(await listJobs(userId)); }
     catch (cause) { return error(cause); }
   });
 

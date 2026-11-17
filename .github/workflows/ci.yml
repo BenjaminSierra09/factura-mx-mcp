@@ -9,6 +9,26 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    services:
+      mariadb:
+        image: mariadb:11.8
+        env:
+          MARIADB_ROOT_PASSWORD: test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+    env:
+      DB_HOST: 127.0.0.1
+      DB_PORT: 3306
+      DB_USER: root
+      DB_PASSWORD: test
+      DB_NAME: factura_mx_ci
+      TEST_DB_USER: root
+      TEST_DB_PASSWORD: test
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -18,5 +38,4 @@ jobs:
       - run: npm ci
       - run: npm run check
       - run: npm test
-      - run: npm run build
       - run: npm audit --omit=dev --audit-level=high

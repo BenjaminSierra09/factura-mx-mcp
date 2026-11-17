@@ -14,6 +14,11 @@ services:
       HOST: 0.0.0.0
       PORT: 8787
       DATA_DIR: /app/data
+      DB_HOST: mariadb
+      DB_PORT: 3306
+      DB_NAME: factura_mx
+      DB_USER: factura
+      DB_PASSWORD_FILE: /run/secrets/mariadb_app_password
       APP_ALLOWED_HOSTS: localhost,127.0.0.1
       RECAPTCHA_SITE_KEY: "${RECAPTCHA_SITE_KEY:-}"
       RECAPTCHA_SECRET_KEY: "${RECAPTCHA_SECRET_KEY:-}"
@@ -21,7 +26,56 @@ services:
       HEADLESS: "true"
     volumes:
       - factura_data:/app/data
+    secrets:
+      - source: mariadb_app_password
+        target: mariadb_app_password
+        uid: "1000"
+        gid: "1000"
+        mode: 0o400
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/healthz').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      start_period: 30s
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  mariadb:
+    image: mariadb:11.8
+    environment:
+      MARIADB_DATABASE: factura_mx
+      MARIADB_USER: factura
+      MARIADB_PASSWORD_FILE: /run/secrets/mariadb_app_password
+      MARIADB_ROOT_PASSWORD_FILE: /run/secrets/mariadb_root_password
+    ports:
+      - "127.0.0.1:${DB_PORT:-3307}:3306"
+    volumes:
+      - mariadb_data:/var/lib/mysql
+    secrets:
+      - source: mariadb_app_password
+        target: mariadb_app_password
+        mode: 0o444
+      - source: mariadb_root_password
+        target: mariadb_root_password
+        mode: 0o444
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      start_period: 30s
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    stop_grace_period: 30s
     restart: unless-stopped
 
 volumes:
   factura_data:
+  mariadb_data:
+
+secrets:
+  mariadb_app_password:
+    environment: DB_PASSWORD
+  mariadb_root_password:
+    environment: DB_ROOT_PASSWORD

@@ -5,8 +5,8 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
-import Database from 'better-sqlite3';
 import sharp from 'sharp';
+import { createTestDatabase } from './support/mariadb.js';
 
 async function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -20,12 +20,13 @@ async function freePort(): Promise<number> {
   });
 }
 
-test('API separates users, protects writes, and serves authenticated MCP', { timeout: 30_000 }, async () => {
+test('API separates users, protects writes, and serves authenticated MCP', { timeout: 45_000 }, async () => {
   const dataDir = await mkdtemp(path.join(os.tmpdir(), 'factura-api-test-'));
+  const testDb = await createTestDatabase();
   const port = await freePort();
   const base = `http://127.0.0.1:${port}`;
   const child = spawn(process.execPath, ['--import', 'tsx', 'src/server.ts'], {
-    cwd: process.cwd(), env: { ...process.env, DATA_DIR: dataDir, PORT: String(port), HOST: '127.0.0.1',
+    cwd: process.cwd(), env: { ...process.env, ...testDb.env, DATA_DIR: dataDir, PORT: String(port), HOST: '127.0.0.1',
       APP_PUBLIC_ORIGIN: '', APP_ALLOWED_HOSTS: 'localhost,127.0.0.1',
       RECAPTCHA_SITE_KEY: '', RECAPTCHA_SECRET_KEY: '', RECAPTCHA_SECRET_KEY_FILE: '',
       API_EXPENSIVE_LIMIT: '2', API_ACTION_LIMIT: '2', API_MCP_LIMIT: '2' }, stdio: 'pipe',
@@ -147,15 +148,17 @@ test('API separates users, protects writes, and serves authenticated MCP', { tim
     assert.equal((await invalidLogin('another-invalid-address')).status, 400,
       'another email can still use the shared connector IP');
 
-    const externalDb = new Database(path.join(dataDir, 'app.sqlite'));
-    try { externalDb.prepare('UPDATE tickets SET analysis_json=? WHERE id=?').run('SENTINEL_SECRET', ticket.id); }
-    finally { externalDb.close(); }
+    await testDb.query('UPDATE tickets SET analysis_json=? WHERE id=?', ['SENTINEL_SECRET', ticket.id]);
     const failedRead = await fetch(`${base}/api/tickets`, { headers: { cookie: alice.cookie } });
     assert.equal(failedRead.status, 500, 'unexpected data errors are server errors');
     assert.deepEqual(await failedRead.json(), { error: 'Error interno. Intenta más tarde.' },
       'internal exception text is not returned to the client');
   } finally {
-    child.kill('SIGTERM');
+    if (child.exitCode === null) {
+      child.kill('SIGTERM');
+      await new Promise(resolve => child.once('exit', resolve));
+    }
+    await testDb.close();
     await rm(dataDir, { recursive: true, force: true });
   }
 });
