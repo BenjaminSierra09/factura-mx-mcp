@@ -48,6 +48,16 @@ npm run dev
 
 Antes de iniciar, cambia las dos contraseñas de ejemplo en `.env`. El proceso Node se conecta a MariaDB en `127.0.0.1:3307`; si ya tienes una instancia MariaDB, ajusta `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER` y `DB_PASSWORD` y crea la base y el usuario con permisos sobre ella. Después abre [http://127.0.0.1:8787](http://127.0.0.1:8787). Cada usuario puede guardar su propia API key de OpenAI; es opcional para la lectura local y necesaria para las funciones de IA. Los modelos se pueden ajustar con `OPENAI_DISCOVERY_MODEL`, `FACTURADOR_VISION_MODEL` y `FACTURADOR_BROWSER_MODEL`.
 
+### 🔑 Conectar una clave de OpenAI
+
+En **Perfil fiscal → Lectura con IA** puedes pegar una clave existente o abrir [la página oficial de claves de OpenAI](https://platform.openai.com/api-keys) desde el botón del panel:
+
+1. En la pestaña de OpenAI, elige tu proyecto, crea una clave y cópiala. [La clave completa sólo se muestra al crearla](https://help.openai.com/en/articles/4936850-where-do-i-find-my-openai-api-key).
+2. Vuelve a Factura Clara y pulsa **Guardar clave copiada**. El navegador solicitará permiso para leer el portapapeles; si no lo permite, pega la clave en el campo y pulsa **Guardar clave**.
+3. El indicador cambiará a **Clave guardada**. La aplicación envía la clave a su servidor y la cifra antes de guardarla; no vuelve a mostrarla.
+
+La documentación oficial no describe un callback que devuelva una clave personal a sitios externos: [la clave sólo se muestra al crearla](https://help.openai.com/en/articles/4936850-where-do-i-find-my-openai-api-key) y [la API de administración no crea claves personales para otros usuarios](https://developers.openai.com/api/docs/guides/api-keys). Abrir la pestaña facilita la creación y el regreso, pero guardar la clave requiere la acción explícita del usuario. «Sign in with ChatGPT» usa OAuth para identidad o acceso autorizado a ciertos servicios, [sin entregar la API key personal](https://developers.openai.com/siwc/quickstart).
+
 ### Protección del acceso con reCAPTCHA
 
 Registro e inicio de sesión aceptan **Google reCAPTCHA v2 (casilla «No soy un robot»)**. Crea un par de claves en [Google reCAPTCHA](https://www.google.com/recaptcha/admin/create), registra el dominio donde abrirás el panel y configura `RECAPTCHA_SITE_KEY` y `RECAPTCHA_SECRET_KEY`. Para pruebas locales con Node o Docker, añade `localhost` a una clave separada de desarrollo y guarda ambas variables en `.env`. La clave secreta se usa sólo en el servidor: cada respuesta se valida con Google y se comprueba que el dominio coincida con el de la solicitud. [Google indica que los tokens duran dos minutos y sólo se usan una vez](https://developers.google.com/recaptcha/docs/verify).

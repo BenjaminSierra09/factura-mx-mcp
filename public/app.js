@@ -43,6 +43,7 @@
     installPrompt: null,
     serviceWorkerRegistration: null,
     reloadingForUpdate: false,
+    awaitingOpenAiKey: false,
   };
 
   const $ = (selector, root = document) => root.querySelector(selector);
@@ -501,19 +502,50 @@
     } catch (error) { notify(error.message, 'error'); }
   }
 
+  async function storeOpenAiKey(key, button) {
+    await withPending(button, async () => {
+      const response = await api('/api/profile', { method: 'PUT', body: { openAiKey: key } });
+      state.profile = response.profile || response;
+      state.awaitingOpenAiKey = false;
+      $('#openai-key').value = '';
+      $('#openai-key-guide-status').textContent = 'Clave guardada. Si la copiaste, puedes borrarla del portapapeles.';
+      renderProfile();
+      notify('Clave de OpenAI guardada.');
+    });
+  }
+
   async function saveApiKey(event) {
     event.preventDefault();
     const key = $('#openai-key').value.trim();
     if (!key) { notify('Escribe una clave de OpenAI.', 'error'); return; }
-    try {
-      await withPending($('#api-form button[type=submit]'), async () => {
-        const response = await api('/api/profile', { method: 'PUT', body: { openAiKey: key } });
-        state.profile = response.profile || response;
-        $('#openai-key').value = '';
-        renderProfile();
-        notify('Clave de OpenAI guardada.');
-      });
-    } catch { /* toast from withPending */ }
+    try { await storeOpenAiKey(key, $('#api-form button[type=submit]')); }
+    catch { /* toast from withPending */ }
+  }
+
+  async function saveCopiedOpenAiKey() {
+    const status = $('#openai-key-guide-status');
+    if (!window.isSecureContext || !navigator.clipboard?.readText) {
+      status.textContent = 'Tu navegador no permite leer el portapapeles aquí. Pega la clave en el campo de abajo.';
+      return;
+    }
+    let key;
+    try { key = (await navigator.clipboard.readText()).trim(); }
+    catch {
+      status.textContent = 'No pude leer el portapapeles. Pega la clave en el campo de abajo.';
+      return;
+    }
+    if (!/^sk-[A-Za-z0-9_-]{12,}$/.test(key) || key.length > 512) {
+      status.textContent = 'El portapapeles no parece contener una clave API de OpenAI. Cópiala en OpenAI o pégala abajo.';
+      return;
+    }
+    try { await storeOpenAiKey(key, $('#openai-clipboard-save')); }
+    catch { status.textContent = 'No se pudo guardar la clave. Revisa tu conexión y vuelve a intentarlo.'; }
+  }
+
+  function remindOpenAiKeyReturn() {
+    if (state.awaitingOpenAiKey && !document.hidden) {
+      $('#openai-key-guide-status').textContent = 'Si ya creaste y copiaste la clave, pulsa «Guardar clave copiada». También puedes pegarla abajo.';
+    }
   }
 
   async function saveSmtp(event) {
@@ -1324,6 +1356,13 @@
     $('#profile-regimen').addEventListener('change', () => renderFiscalSelects($('#profile-regimen').value, ''));
     $('#csf-form').addEventListener('submit', uploadCsf);
     $('#api-form').addEventListener('submit', saveApiKey);
+    $('#openai-create-key-link').addEventListener('click', () => {
+      state.awaitingOpenAiKey = true;
+      $('#openai-key-guide-status').textContent = 'Copia la clave en OpenAI y vuelve aquí para guardarla.';
+    });
+    $('#openai-clipboard-save').addEventListener('click', () => void saveCopiedOpenAiKey());
+    window.addEventListener('focus', remindOpenAiKeyReturn);
+    document.addEventListener('visibilitychange', remindOpenAiKeyReturn);
     $('#smtp-form').addEventListener('submit', saveSmtp);
     $('#csf-file').addEventListener('change', event => { $('#csf-file-name').textContent = event.target.files[0]?.name || ''; });
     $('#ticket-file').addEventListener('change', event => {

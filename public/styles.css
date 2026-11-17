@@ -1466,6 +1466,64 @@ a {
   line-height: 1.5;
 }
 
+.openai-key-setup {
+  padding: 17px;
+  border: 1px solid #e8e8e5;
+  border-radius: 8px;
+  background: #fafaf9;
+}
+
+.openai-key-setup h3 {
+  margin: 0 0 11px;
+  font-size: 14px;
+}
+
+.openai-key-setup ol {
+  margin: 0 0 17px;
+  padding-left: 21px;
+  color: #666662;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.openai-key-setup li {
+  padding-left: 3px;
+  margin: 0 0 6px;
+}
+
+.openai-key-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.openai-key-actions .button {
+  white-space: normal;
+  font-size: 12px;
+}
+
+.openai-key-setup .field-hint {
+  min-height: 16px;
+}
+
+.openai-key-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 20px 0 13px;
+  color: #858580;
+  font-size: 11px;
+}
+
+.openai-key-divider::before,
+.openai-key-divider::after {
+  content: '';
+  height: 1px;
+  flex: 1;
+  background: var(--line);
+}
+
 .save-status {
   font-size: 12px;
   color: #5f7564;
@@ -2181,6 +2239,14 @@ a {
   }
 
   .inline-upload input:not([type=file]) {
+    width: 100%;
+  }
+
+  .openai-key-actions {
+    flex-direction: column;
+  }
+
+  .openai-key-actions .button {
     width: 100%;
   }
 
