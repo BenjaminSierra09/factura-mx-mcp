@@ -46,7 +46,9 @@ docker compose up -d mariadb
 npm run dev
 ```
 
-Antes de iniciar, cambia las dos contraseñas de ejemplo en `.env`. El proceso Node se conecta a MariaDB en `127.0.0.1:3307`; si ya tienes una instancia MariaDB, ajusta `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER` y `DB_PASSWORD` y crea la base y el usuario con permisos sobre ella. Después abre [http://127.0.0.1:8787](http://127.0.0.1:8787). Cada usuario puede guardar su propia API key de OpenAI; es opcional para la lectura local y necesaria para las funciones de IA. Los modelos se pueden ajustar con `OPENAI_DISCOVERY_MODEL`, `FACTURADOR_VISION_MODEL` y `FACTURADOR_BROWSER_MODEL`.
+Antes de iniciar, cambia las dos contraseñas de ejemplo en `.env`. El proceso Node se conecta a MariaDB en `127.0.0.1:3307`; si ya tienes una instancia MariaDB, ajusta `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER` y `DB_PASSWORD` y crea la base y el usuario con permisos sobre ella. Después abre [http://127.0.0.1:8787](http://127.0.0.1:8787). Cada usuario puede guardar su propia API key de OpenAI; es opcional para la lectura local y necesaria para las funciones de IA.
+
+**Modelo predeterminado: [GPT-6 Luna](https://developers.openai.com/api/docs/models/gpt-6-luna)** en las tres fases de IA: lectura de tickets y constancias, búsqueda de portales y planificación de acciones del navegador. Puedes cambiar una fase con `FACTURADOR_VISION_MODEL`, `OPENAI_DISCOVERY_MODEL` o `FACTURADOR_BROWSER_MODEL` en `.env` (o en el archivo pasado a `docker compose --env-file`). Docker Compose transmite estos ajustes al contenedor.
 
 ### 🔑 Conectar una clave de OpenAI
 
